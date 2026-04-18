@@ -28,16 +28,24 @@ export const databaseService = {
     let updated = 0;
 
     newEvents.forEach(normalized => {
-      const existingEvent = existingMap.get(normalized.external_event_id);
+      // Robust duplicate detection using external_event_id OR duplicate_key
+      const existingById = existingMap.get(normalized.external_event_id);
+
+      // Secondary check by searching for duplicate_key in existing values
+      const existingByKey = existingById ? null : Array.from(existingMap.values()).find(e => e.duplicate_key === normalized.duplicate_key);
+
+      const existingEvent = existingById || existingByKey;
       
       if (existingEvent) {
         // Simple change detection - in a real DB we'd compare hash or fields
-        // For now, we update if something changed
+        // For now, we update if something significant changed
         const hasChanged = JSON.stringify(existingEvent.raw_payload) !== JSON.stringify(normalized.raw_payload);
         
         if (hasChanged) {
-          existingMap.set(normalized.external_event_id, {
+          // If found by key but with different ID, we should still update the record associated with that key
+          existingMap.set(existingEvent.external_event_id, {
             ...normalized,
+            external_event_id: existingEvent.external_event_id, // Keep the ID we already have
             id: existingEvent.id // Keep internal ID
           });
           updated++;

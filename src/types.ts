@@ -61,6 +61,7 @@ export interface Source {
   category: string;
   lastScanned?: string;
   status: 'active' | 'inactive';
+  frequency: number; // minutes
 }
 
 export interface MetricPoint {

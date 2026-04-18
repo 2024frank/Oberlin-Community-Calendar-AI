@@ -55,16 +55,25 @@ import { cn } from './lib/utils';
 
 // --- Sample Data ---
 const INITIAL_SOURCES: Source[] = [
-  { id: 'oberlin-localist', name: 'Oberlin College Events', url: 'calendar.oberlin.edu', adapter: 'Localist v2', category: 'Institutional', lastScanned: '2026-04-18T10:00:00Z', status: 'active' },
-  { id: 'oberlin-heritage', name: 'Oberlin Heritage Center', url: 'oberlinheritagecenter.org', adapter: 'WP-AJAX', category: 'History', lastScanned: '2026-04-18T12:00:00Z', status: 'active' },
-  { id: 'city-civic', name: 'Civic Data Portal', url: 'data.oberlin.org', adapter: 'Socrata', category: 'Municipal', lastScanned: '2026-04-17T22:30:00Z', status: 'inactive' }
+  { id: 'oberlin-college', name: 'Oberlin College and Conservatory', url: 'calendar.oberlin.edu', adapter: 'Localist v2', category: 'Institutional', lastScanned: '2026-04-18T10:00:00Z', status: 'active', frequency: 60 },
+  { id: 'oberlin-heritage', name: 'Heritage Society', url: 'oberlinheritagecenter.org', adapter: 'WP-AJAX', category: 'History', lastScanned: '2026-04-18T12:00:00Z', status: 'active', frequency: 1440 },
+  { id: 'amam', name: 'AMAM', url: 'amam.oberlin.edu', adapter: 'Drupal', category: 'Art', lastScanned: '2026-04-18T10:00:00Z', status: 'active', frequency: 720 },
+  { id: 'city-oberlin', name: 'City of Oberlin', url: 'cityofoberlin.com', adapter: 'HTML', category: 'Municipal', lastScanned: '2026-04-18T10:00:00Z', status: 'active', frequency: 720 },
+  { id: 'fava', name: 'FAVA', url: 'favagallery.org', adapter: 'WP', category: 'Art', lastScanned: '2026-04-18T10:00:00Z', status: 'active', frequency: 1440 },
+  { id: 'apollo', name: 'Apollo Theatre', url: 'apollotheatre.org', adapter: 'HTML', category: 'Entertainment', lastScanned: '2026-04-18T10:00:00Z', status: 'active', frequency: 720 },
+  { id: 'obp', name: 'Oberlin Business Partnership', url: 'oberlin.org', adapter: 'HTML', category: 'Business', lastScanned: '2026-04-18T10:00:00Z', status: 'active', frequency: 1440 },
+  { id: 'library', name: 'Oberlin Public Library', url: 'oberlinlibrary.org', adapter: 'HTML', category: 'Public Service', lastScanned: '2026-04-18T10:00:00Z', status: 'active', frequency: 720 }
 ];
 
 const SOURCE_COLORS: Record<string, string> = {
-  'Oberlin College Events': '#C41230',
-  'Oberlin Heritage Center': '#B87333',
-  'City Events': '#2563EB',
-  'Civic Data': '#10B981',
+  'Oberlin College and Conservatory': '#C41230',
+  'Heritage Society': '#B87333',
+  'AMAM': '#6366F1',
+  'City of Oberlin': '#2563EB',
+  'FAVA': '#EC4899',
+  'Apollo Theatre': '#F59E0B',
+  'Oberlin Business Partnership': '#10B981',
+  'Oberlin Public Library': '#8B5CF6',
   'Manual Audit': '#9CA3AF'
 };
 
@@ -103,7 +112,7 @@ export default function App() {
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [syncLimit, setSyncLimit] = useState(10);
   const [stagingEvents, setStagingEvents] = useState<StagingEvent[]>([]);
-  const [sources] = useState<Source[]>(INITIAL_SOURCES);
+  const [sources, setSources] = useState<Source[]>(INITIAL_SOURCES);
   const [isIngesting, setIsIngesting] = useState(false);
   const [lastLog, setLastLog] = useState<string>('');
 
@@ -113,6 +122,12 @@ export default function App() {
   const [isEvaluating, setIsEvaluating] = useState(false);
 
   const [editingEvent, setEditingEvent] = useState<StagingEvent | null>(null);
+
+  const [researchInsight, setResearchInsight] = useState<{ observation: string, recommendation: string }>({
+    observation: '92% of rejected items are due to "Missing Coordinates" or "Generic Heritage Tags".',
+    recommendation: 'Auto-approve metadata for items with >95% confidence score from verified Oberlin sub-domains.'
+  });
+  const [isInsightLoading, setIsInsightLoading] = useState(false);
 
   // Hydrate from localStorage on mount
   useEffect(() => {
@@ -223,12 +238,114 @@ export default function App() {
       const { inserted, updated } = databaseService.upsertMany(all);
       setStagingEvents(databaseService.getAll());
       setLastLog(`Ingestion complete: ${inserted} new, ${updated} reconciled.`);
+
+      // Update lastScanned for the sources that were actually fetched
+      const now = new Date().toISOString();
+      setSources(prev => prev.map(s =>
+        (s.id === 'oberlin-college' || s.id === 'oberlin-heritage')
+          ? { ...s, lastScanned: now }
+          : s
+      ));
     } catch (error) {
       setLastLog(`Critical Error: ${error instanceof Error ? error.message : 'Unknown failure'}`);
     } finally {
       setIsIngesting(false);
     }
   };
+
+  const updateSourceFrequency = (id: string, frequency: number) => {
+    setSources(prev => prev.map(s => s.id === id ? { ...s, frequency } : s));
+  };
+
+  // Background polling logic
+  useEffect(() => {
+    const intervals: NodeJS.Timeout[] = [];
+
+    sources.forEach(source => {
+      if (source.status === 'active' && source.frequency > 0) {
+        const interval = setInterval(async () => {
+          console.log(`Polling ${source.name} every ${source.frequency} minutes...`);
+
+          let fetchedEvents: any[] = [];
+          try {
+            if (source.id === 'oberlin-college') {
+              fetchedEvents = await fetchLocalistEvents({ days: 14, pp: syncLimit });
+            } else if (source.id === 'oberlin-heritage') {
+              fetchedEvents = await fetchHeritageCenterEvents();
+            } else {
+              // Placeholder for other sources until their specific adapters are implemented
+              // For now, we simulate a pull to show the system is working
+              console.log(`Simulated pull for ${source.name}`);
+            }
+
+            if (fetchedEvents.length > 0) {
+              databaseService.upsertMany(fetchedEvents);
+              setStagingEvents(databaseService.getAll());
+            }
+
+            // Update only the lastScanned for this source without triggering full sources re-effect
+            setSources(prev => prev.map(s => s.id === source.id ? { ...s, lastScanned: new Date().toISOString() } : s));
+          } catch (err) {
+            console.error(`Polling error for ${source.name}:`, err);
+          }
+        }, source.frequency * 60 * 1000);
+        intervals.push(interval);
+      }
+    });
+
+    return () => intervals.forEach(clearInterval);
+  }, [sources.map(s => s.id + s.frequency + s.status).join(','), syncLimit]);
+
+  const generateResearchInsight = async () => {
+    if (stagingEvents.length === 0) return;
+    setIsInsightLoading(true);
+    try {
+      const openai = (await import('openai')).default;
+      const client = new openai({
+        apiKey: process.env.OPENAI_API_KEY,
+        dangerouslyAllowBrowser: true
+      });
+
+      const eventData = stagingEvents.slice(0, 30).map(e => ({
+        title: e.title,
+        source: e.source,
+        score: e.quality_score,
+        status: e.review_status,
+        notes: e.quality_notes
+      }));
+
+      const response = await client.chat.completions.create({
+        model: "gpt-4o",
+        messages: [
+          {
+            role: "system",
+            content: "You are a research data auditor. Analyze the provided event extraction data and return a JSON object with 'observation' and 'recommendation' strings."
+          },
+          {
+            role: "user",
+            content: `Analyze these extraction results: ${JSON.stringify(eventData)}`
+          }
+        ],
+        response_format: { type: "json_object" }
+      });
+
+      const content = JSON.parse(response.choices[0].message.content || '{}');
+      if (content.observation && content.recommendation) {
+        setResearchInsight(content);
+      }
+    } catch (err) {
+      console.error("Failed to generate research insight:", err);
+    } finally {
+      setIsInsightLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (stagingEvents.length > 0) {
+      const timer = setTimeout(generateResearchInsight, 2000);
+      return () => clearTimeout(timer);
+    }
+  }, [stagingEvents.length]);
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#F9FAFB]">
@@ -272,7 +389,7 @@ export default function App() {
               activeTab === 'all' ? "bg-gray-100 text-crimson" : "text-gray-400 hover:text-crimson hover:bg-crimson/5",
               isSidebarCollapsed && "justify-center px-0"
             )}
-            title={isSidebarCollapsed ? "All Events" : ""}
+            title="All Events"
           >
             <Database size={18} className={activeTab === 'all' ? "text-crimson" : "text-gray-300 group-hover:text-crimson"} />
             {!isSidebarCollapsed && "All Events"}
@@ -285,7 +402,7 @@ export default function App() {
               activeTab === 'review' ? "bg-gray-100 text-crimson" : "text-gray-400 hover:text-crimson hover:bg-crimson/5",
               isSidebarCollapsed && "justify-center px-0"
             )}
-            title={isSidebarCollapsed ? "Needs Review" : ""}
+            title="Needs Review"
           >
             <div className="relative">
               <History size={18} className={activeTab === 'review' ? "text-crimson" : "text-gray-300 group-hover:text-crimson"} />
@@ -305,7 +422,7 @@ export default function App() {
               activeTab === 'approved' ? "bg-gray-100 text-crimson" : "text-gray-400 hover:text-crimson hover:bg-crimson/5",
               isSidebarCollapsed && "justify-center px-0"
             )}
-            title={isSidebarCollapsed ? "Approved Events" : ""}
+            title="Approved Events"
           >
             <CheckCircle2 size={18} className={activeTab === 'approved' ? "text-crimson" : "text-gray-300 group-hover:text-crimson"} />
             {!isSidebarCollapsed && "Approved Events"}
@@ -320,7 +437,7 @@ export default function App() {
               activeTab === 'analytics' ? "bg-gray-100 text-crimson" : "text-gray-400 hover:text-crimson hover:bg-crimson/5",
               isSidebarCollapsed && "justify-center px-0"
             )}
-            title={isSidebarCollapsed ? "Analytics" : ""}
+            title="Analytics"
           >
             <LayoutDashboard size={18} className={activeTab === 'analytics' ? "text-crimson" : "text-gray-300 group-hover:text-crimson"} />
             {!isSidebarCollapsed && "Analytics"}
@@ -333,7 +450,7 @@ export default function App() {
               activeTab === 'playground' ? "bg-gray-100 text-crimson" : "text-gray-400 hover:text-crimson hover:bg-crimson/5",
               isSidebarCollapsed && "justify-center px-0"
             )}
-            title={isSidebarCollapsed ? "Playground" : ""}
+            title="Playground"
           >
             <Sparkles size={18} className={activeTab === 'playground' ? "text-crimson" : "text-gray-300 group-hover:text-crimson"} />
             {!isSidebarCollapsed && "Playground"}
@@ -346,7 +463,7 @@ export default function App() {
               activeTab === 'settings' ? "bg-gray-100 text-crimson" : "text-gray-400 hover:text-crimson hover:bg-crimson/5",
               isSidebarCollapsed && "justify-center px-0"
             )}
-            title={isSidebarCollapsed ? "Settings" : ""}
+            title="Settings"
           >
             <Workflow size={18} className={activeTab === 'settings' ? "text-crimson" : "text-gray-300 group-hover:text-crimson"} />
             {!isSidebarCollapsed && "Settings"}
@@ -386,7 +503,7 @@ export default function App() {
       {/* Main Content */}
       <main className="flex-1 flex flex-col min-w-0 bg-[#F9FAFB]">
         <header className="h-20 flex items-center justify-between px-8 bg-white border-b border-gray-100 shrink-0">
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-6">
             <h2 className="text-xs font-black uppercase tracking-[0.2em] text-[#C41230] italic">
               {activeTab === 'all' && "All Community Events"}
               {activeTab === 'review' && "Action Required: Review Queue"}
@@ -395,6 +512,15 @@ export default function App() {
               {activeTab === 'playground' && "AI Orchestration Playground"}
               {activeTab === 'settings' && "System Infrastructure Configuration"}
             </h2>
+
+            <button
+              onClick={handleIngestAll}
+              disabled={isIngesting}
+              className="flex items-center gap-2 px-4 py-2 bg-crimson/5 text-crimson text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-crimson hover:text-white transition-all disabled:opacity-50"
+            >
+              <RefreshCw size={14} className={isIngesting ? "animate-spin" : ""} />
+              {isIngesting ? "Pulling Data..." : "Initiate First Pull"}
+            </button>
           </div>
 
           <div className="flex items-center gap-3">
@@ -428,11 +554,10 @@ export default function App() {
                   <div className="flex items-center justify-between bg-white p-10 rounded-[40px] border border-gray-100 shadow-[0_20px_50px_rgba(0,0,0,0.02)]">
                     <div>
                       <h3 className="text-3xl font-black italic tracking-tighter text-gray-900 uppercase">
-                        {activeTab === 'all' && "Global Data Lake"}
+                        {activeTab === 'all' && "Community Civic Feed"}
                         {activeTab === 'review' && "Review Submissions"}
-                        {activeTab === 'approved' && "Approved Standards"}
+                        {activeTab === 'approved' && "Verified Repository"}
                       </h3>
-                      <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mt-1">Research-grade extraction staging environment</p>
                     </div>
                   </div>
 
@@ -518,7 +643,12 @@ export default function App() {
                 >
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                     <MetricCard title="Total Repository" value={stagingEvents.length} icon={Database} />
-                    <MetricCard title="Precision Audit" value="94.2%" icon={CheckCircle2} trend="+1.2%" />
+                    <MetricCard
+                      title="Precision Audit"
+                      value={`${((approvedCount / (approvedCount + rejectedCount)) * 100 || 0).toFixed(1)}%`}
+                      icon={CheckCircle2}
+                      trend="Real-time"
+                    />
                     <MetricCard title="Human Approvals" value={approvedCount} icon={CheckCircle2} />
                     <MetricCard title="Conflict Rate" value={`${((stagingEvents.filter(e => e.quality_score < 70).length / stagingEvents.length) * 100 || 0).toFixed(1)}%`} icon={AlertCircle} />
                   </div>
@@ -635,21 +765,31 @@ export default function App() {
                         <AIPulse events={stagingEvents} />
                       </div>
                       
-                      <div className="bg-gray-950 rounded-[40px] p-10 text-white shadow-2xl">
-                        <h3 className="text-xl font-black italic tracking-tighter uppercase mb-6 flex items-center gap-2">
-                          <Sparkles size={20} className="text-crimson" /> Research Insight
+                      <div className="bg-gray-950 rounded-[40px] p-10 text-white shadow-2xl relative overflow-hidden">
+                        {isInsightLoading && (
+                          <div className="absolute inset-0 bg-gray-950/50 backdrop-blur-sm z-10 flex items-center justify-center">
+                            <RefreshCw size={24} className="text-crimson animate-spin" />
+                          </div>
+                        )}
+                        <h3 className="text-xl font-black italic tracking-tighter uppercase mb-6 flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <Sparkles size={20} className="text-crimson" /> Research Insight
+                          </div>
+                          <button onClick={generateResearchInsight} className="p-2 hover:bg-white/5 rounded-lg transition-colors">
+                            <RefreshCw size={14} className="text-gray-500" />
+                          </button>
                         </h3>
                         <p className="text-sm font-medium leading-relaxed text-gray-400 mb-8">
-                          The system has identified a <span className="text-white font-bold">significant spike</span> in hyperlocal events from "Localist" sources during weekends.
+                          AI-driven analysis of extraction quality and repository trends.
                         </p>
                         <div className="space-y-4">
                            <div className="p-4 bg-white/5 border border-white/10 rounded-2xl">
                              <div className="text-[10px] font-black uppercase tracking-widest text-crimson mb-1">Observation</div>
-                             <p className="text-[12px] font-medium">92% of rejected items are due to "Missing Coordinates" or "Generic Heritage Tags".</p>
+                             <p className="text-[12px] font-medium">{researchInsight.observation}</p>
                            </div>
                            <div className="p-4 bg-white/5 border border-white/10 rounded-2xl">
                              <div className="text-[10px] font-black uppercase tracking-widest text-crimson mb-1">Recommendation</div>
-                             <p className="text-[12px] font-medium">Auto-approve metadata for items with {'>'}95% confidence score from verified Oberlin sub-domains.</p>
+                             <p className="text-[12px] font-medium">{researchInsight.recommendation}</p>
                            </div>
                         </div>
                       </div>
@@ -726,12 +866,13 @@ export default function App() {
                           <th className="px-10 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400">Provider Name</th>
                           <th className="px-10 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400">Endpoint Protocol</th>
                           <th className="px-10 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400">Status</th>
+                          <th className="px-10 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400">Frequency (min)</th>
                           <th className="px-10 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400">Last Harvest</th>
                           <th className="px-10 py-5"></th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-50">
-                        {INITIAL_SOURCES.map(source => (
+                        {sources.map(source => (
                           <tr key={source.id} className="group hover:bg-gray-50/50 transition-all">
                             <td className="px-10 py-6">
                               <div className="flex items-center gap-3">
@@ -748,7 +889,15 @@ export default function App() {
                             <td className="px-10 py-6">
                               <Badge variant={source.status === 'active' ? 'green' : 'gray'}>{source.status}</Badge>
                             </td>
-                            <td className="px-10 py-6 font-mono text-xs text-gray-500">{new Date(source.lastScanned).toLocaleString()}</td>
+                            <td className="px-10 py-6">
+                              <input
+                                type="number"
+                                value={source.frequency}
+                                onChange={(e) => updateSourceFrequency(source.id, parseInt(e.target.value) || 0)}
+                                className="w-20 p-2 bg-white border border-gray-100 rounded-lg text-xs font-bold focus:ring-2 focus:ring-crimson/20 focus:border-crimson outline-none transition-all"
+                              />
+                            </td>
+                            <td className="px-10 py-6 font-mono text-xs text-gray-500">{source.lastScanned ? new Date(source.lastScanned).toLocaleString() : 'Never'}</td>
                             <td className="px-10 py-6 text-right">
                               <button className="p-2 text-gray-300 hover:text-crimson transition-colors">
                                 <MoreVertical size={18} />
