@@ -73,9 +73,14 @@ export const AIPulse: React.FC<AIPulseProps> = ({ events }) => {
             <div className="w-10 h-10 rounded-2xl bg-crimson/5 flex items-center justify-center text-crimson">
               <Zap size={20} />
             </div>
-            <div>
+            <div className="group relative">
               <h3 className="text-sm font-black uppercase tracking-widest text-gray-900">AI Community Pulse</h3>
               <p className="text-[10px] font-bold text-gray-400 uppercase tracking-tighter">Real-time Meta-Analysis</p>
+
+              {/* Explanation Tooltip */}
+              <div className="absolute left-0 top-full mt-2 w-64 p-3 bg-gray-900 text-white text-[10px] rounded-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 font-medium leading-relaxed shadow-xl">
+                Real-time Meta-Analysis: An AI-driven synthesis of current community events to identify dominant themes, sentiment, and engagement opportunities in real-time.
+              </div>
             </div>
           </div>
           <button 
