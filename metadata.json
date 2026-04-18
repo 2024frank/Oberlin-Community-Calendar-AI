@@ -1,0 +1,6 @@
+{
+  "name": "Oberlin Community Calendar AI",
+  "description": "AI system that collects event information from Oberlin College and local community websites, extracts structured data, and prepares standardized entries for the Environmental Dashboard calendar.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
