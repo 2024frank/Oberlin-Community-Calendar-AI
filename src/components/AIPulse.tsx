@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { GoogleGenAI } from "@google/genai";
+import OpenAI from 'openai';
 import { Sparkles, Activity, ShieldAlert, Zap, Quote } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { StagingEvent } from '../types';
@@ -22,8 +22,16 @@ export const AIPulse: React.FC<AIPulseProps> = ({ events }) => {
     setIsLoading(true);
     setError(null);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      
+      if (!process.env.OPENAI_API_KEY) {
+        setError("OPENAI_API_KEY is not configured.");
+        return;
+      }
+
+      const client = new OpenAI({
+        apiKey: process.env.OPENAI_API_KEY,
+        dangerouslyAllowBrowser: true,
+      });
+
       const eventData = events.slice(0, 50).map(e => ({
         title: e.title,
         source: e.source,
@@ -31,24 +39,27 @@ export const AIPulse: React.FC<AIPulseProps> = ({ events }) => {
         tags: e.tags
       }));
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: `
-          You are the 'Oberlin Community Pulse' AI, a researcher helping students understand the vibe of the community.
-          Analyze these events and provide a 2-3 sentence 'Community Pulse' statement. 
-          Identify the dominant 'vibe' (e.g., Intellectual, Artistic, Environmental).
-          Be punchy, academic but cool, and use a specific detail from the events.
-          
-          EVENTS:
-          ${JSON.stringify(eventData)}
-        `,
-        config: {
-            temperature: 0.9,
-            maxOutputTokens: 200
-        }
+      const response = await client.chat.completions.create({
+        model: "gpt-4o",
+        temperature: 0.9,
+        max_tokens: 220,
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are the 'Oberlin Community Pulse' AI. Reply with plain text only: a 2-3 sentence Community Pulse. Name one dominant vibe (e.g. Intellectual, Artistic, Environmental). Be punchy, academic but cool, and cite one specific detail from the events.",
+          },
+          {
+            role: "user",
+            content: `EVENTS (JSON):\n${JSON.stringify(eventData)}`,
+          },
+        ],
       });
 
-      setInsight(response.text || "The digital pulse is steady, awaiting further community activity.");
+      const text =
+        response.choices[0]?.message?.content?.trim() ||
+        "The digital pulse is steady, awaiting further community activity.";
+      setInsight(text);
     } catch (err) {
       setError("Failed to sync with the pulse. Check API configuration.");
       console.error(err);

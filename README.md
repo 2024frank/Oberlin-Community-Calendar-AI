@@ -20,7 +20,7 @@ Traditional web scraping fails when faced with heterogeneous data sources. This 
 
 ### AI Agents
 - **Extraction Agent (OpenAI GPT-4o)**: Orchestrates the transformation of raw text into structured JSON-LD payloads.
-- **Community Pulse Agent (Gemini)**: Analyzes the "vibe" of the community based on current events.
+- **Community Pulse Agent (OpenAI)**: Analyzes the "vibe" of the community based on current events.
 - **Research Insight Agent**: Monitors system performance and provides automated recommendations for data quality improvement.
 
 ### Data Sources
@@ -47,7 +47,6 @@ The system monitors public event information from:
    Copy `.env.example` to `.env` and provide your API keys:
    ```env
    OPENAI_API_KEY=your_key_here
-   GEMINI_API_KEY=your_key_here
    ```
 
 2. **Installation**:

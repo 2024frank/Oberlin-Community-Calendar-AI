@@ -1,6 +1,6 @@
 # Blueprint: one Web Service serves Vite-built SPA + Express API.
-# After first deploy, set OPENAI_API_KEY and GEMINI_API_KEY in the Render dashboard
-# (required for the app; Vite inlines them at build time from the environment).
+# After first deploy, set OPENAI_API_KEY in the Render dashboard
+# (required for AI; Vite inlines it at build time from the environment).
 services:
   - type: web
     name: oberlin-community-calendar-ai
@@ -16,8 +16,6 @@ services:
       - key: NODE_ENV
         value: production
       - key: OPENAI_API_KEY
-        sync: false
-      - key: GEMINI_API_KEY
         sync: false
       - key: API_ACCESS_TOKEN
         sync: false
