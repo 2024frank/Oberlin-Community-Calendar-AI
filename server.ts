@@ -7,10 +7,18 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
-const DATA_FILE = path.join(process.cwd(), 'approved_events.json');
+const PORT = Number(process.env.PORT) || 3000;
+const DATA_FILE =
+  process.env.DATA_FILE_PATH ||
+  (process.env.RENDER_DISK_PATH
+    ? path.join(process.env.RENDER_DISK_PATH, "approved_events.json")
+    : path.join(process.cwd(), "approved_events.json"));
 
 app.use(express.json());
+
+app.get("/health", (_req, res) => {
+  res.json({ ok: true });
+});
 
 // Helper to read approved events
 const getApprovedEvents = () => {
@@ -22,6 +30,7 @@ const getApprovedEvents = () => {
 
 // Helper to save approved events
 const saveApprovedEvents = (events: any[]) => {
+  fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
   fs.writeFileSync(DATA_FILE, JSON.stringify(events, null, 2));
 };
 
