@@ -59,6 +59,12 @@ The system monitors public event information from:
    npm run dev
    ```
 
+4. **Production on Render (split stack)**:
+   - **Static site** (`runtime: static`): serves the built SPA from the CDN so the UI does not depend on a sleeping Node process.
+   - **Web service**: run `npm run start:api` for `/health`, `/api/v1/sync`, and `/api/v1/approved-events` only (this tier may spin down when idle).
+   - Set **`VITE_API_BASE_URL`** on the static site to the API’s public `https://…onrender.com` URL (see `render.yaml`).
+   - Set **`CORS_ORIGINS`** on the API to your static site’s `https://…onrender.com` URL (comma-separated if you have more than one).
+
 ## Precision Metrics
 Extraction accuracy is calculated in real-time as:
 `Accuracy = Approved Records / (Approved Records + Rejected Records)`

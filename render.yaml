@@ -1,21 +1,38 @@
-# Blueprint: one Web Service serves Vite-built SPA + Express API.
-# After first deploy, set OPENAI_API_KEY in the Render dashboard
-# (required for AI; Vite inlines it at build time from the environment).
+# Split stack (recommended on Render free tier):
+# - Static site: SPA from CDN (no cold start for the UI).
+# - Web service: research API only (can spin down when idle).
+#
+# After first deploy, set OPENAI_API_KEY on the static site (Vite bakes it at build time).
+# Set API_ACCESS_TOKEN on the API service. URLs assume these service names; if Render
+# assigns a different slug, update CORS_ORIGINS and VITE_API_BASE_URL to match.
 services:
   - type: web
-    name: oberlin-community-calendar-ai
+    name: oberlin-community-calendar-api
     repo: https://github.com/2024frank/Oberlin-Community-Calendar-AI
     runtime: node
     region: oregon
     plan: free
     branch: main
-    buildCommand: npm install && npm run build
-    startCommand: npm start
+    buildCommand: npm install
+    startCommand: npm run start:api
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV
         value: production
-      - key: OPENAI_API_KEY
-        sync: false
+      - key: CORS_ORIGINS
+        value: https://oberlin-community-calendar-web.onrender.com
       - key: API_ACCESS_TOKEN
+        sync: false
+
+  - type: web
+    name: oberlin-community-calendar-web
+    repo: https://github.com/2024frank/Oberlin-Community-Calendar-AI
+    runtime: static
+    branch: main
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist
+    envVars:
+      - key: VITE_API_BASE_URL
+        value: https://oberlin-community-calendar-api.onrender.com
+      - key: OPENAI_API_KEY
         sync: false

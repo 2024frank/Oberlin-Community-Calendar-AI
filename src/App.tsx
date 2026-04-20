@@ -52,6 +52,7 @@ import { fetchLocalistEvents, fetchHeritageCenterEvents } from './services/local
 import { databaseService } from './services/databaseService';
 import { calculateQualityScore } from './services/normalizationService';
 import { cn } from './lib/utils';
+import { apiUrl } from './lib/apiBase';
 
 // --- Sample Data ---
 const INITIAL_SOURCES: Source[] = [
@@ -134,16 +135,6 @@ export default function App() {
     setStagingEvents(databaseService.getAll());
   }, []);
 
-  // Sync approved events to server for API access
-  useEffect(() => {
-    const approved = stagingEvents.filter(e => e.review_status === 'approved');
-    fetch('/api/v1/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ events: approved })
-    }).catch(console.error);
-  }, [stagingEvents]);
-
   const extractionData = useMemo(() => {
     const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
     return days.map(day => ({
@@ -165,25 +156,14 @@ export default function App() {
     stagingEvents.filter(e => e.review_status === 'rejected').length, 
   [stagingEvents]);
 
-  // Sync approved events to server for persistence and API access
+  // Sync approved events to the research API (separate backend on Render can spin down when idle)
   useEffect(() => {
-    const approved = stagingEvents.filter(e => e.review_status === 'approved');
-    
-    const syncWithServer = async () => {
-      try {
-        await fetch('/api/v1/sync', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ events: approved })
-        });
-      } catch (err) {
-        console.error("Failed to sync with research server", err);
-      }
-    };
-
-    if (approved.length > 0) {
-      syncWithServer();
-    }
+    const approved = stagingEvents.filter((e) => e.review_status === "approved");
+    fetch(apiUrl("/api/v1/sync"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ events: approved }),
+    }).catch((err) => console.error("Failed to sync with research server", err));
   }, [stagingEvents]);
 
   const handleApprove = (id: string) => {
@@ -484,7 +464,7 @@ export default function App() {
               </p>
               <div className="space-y-2">
                 <a 
-                  href="/api/v1/approved-events" 
+                  href={apiUrl("/api/v1/approved-events")} 
                   target="_blank"
                   className="flex items-center justify-between p-2.5 bg-gray-50 border border-gray-100 rounded-xl group hover:border-crimson/30 transition-all"
                 >
