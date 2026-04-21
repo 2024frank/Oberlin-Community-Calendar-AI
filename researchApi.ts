@@ -74,6 +74,49 @@ export function attachResearchApi(app: Express) {
     res.json({ status: "synced", count: (events || []).length });
   });
 
+  // ── Single-event proxy: browser sends event JSON here, we POST to CommunityHub ──
+  // This avoids CORS — browser POSTs to same-origin Vercel, Vercel POSTs to Hub.
+  app.post("/api/v1/hub-proxy", async (req, res) => {
+    const HUB_BASE = "https://oberlin.communityhub.cloud";
+    const token: string | undefined = process.env.COMMUNITYHUB_TOKEN;
+    const payload = req.body;
+
+    if (!payload || !payload.name) {
+      return res.status(400).json({ error: "Missing event payload" });
+    }
+
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+
+    try {
+      // 15-second timeout per event POST
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15_000);
+
+      const hubRes = await fetch(`${HUB_BASE}/api/legacy/calendar/posts`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+
+      const text = await hubRes.text();
+      let json: any = {};
+      try { json = JSON.parse(text); } catch { json = { raw: text }; }
+
+      if (!hubRes.ok) {
+        const clean = text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
+        return res.status(hubRes.status).json({ error: `CommunityHub ${hubRes.status}: ${clean}` });
+      }
+
+      return res.json({ ok: true, id: json.id ?? json.post?.id ?? null });
+    } catch (err: any) {
+      const msg = err.name === "AbortError" ? "Request timed out after 15s" : String(err);
+      return res.status(500).json({ error: msg });
+    }
+  });
+
   // ── Load events from Redis back into the UI (no auth — same origin) ──────────
   app.get("/api/v1/db-events", async (_req, res) => {
     const events = await loadEvents();

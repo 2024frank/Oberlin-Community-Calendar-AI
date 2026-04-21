@@ -220,28 +220,20 @@ export async function postToCommunityHub(event: StagingEvent): Promise<{ id: num
     postType: event.tags?.slice(0, 1).map(t => ({ name: t })) ?? [],
   };
 
-  // Optional Bearer token (set in Vercel env as VITE_COMMUNITYHUB_TOKEN)
-  const token: string | undefined =
-    (import.meta as any).env?.VITE_COMMUNITYHUB_TOKEN ||
-    process.env.COMMUNITYHUB_TOKEN;
-
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-
-  const res = await fetch(`${HUB_BASE}/api/legacy/calendar/posts`, {
+  // ── Route through same-origin Vercel proxy to avoid CORS ────────────────
+  // Browser → /api/v1/hub-proxy (Vercel, same origin) → CommunityHub
+  // This bypasses the browser's CORS preflight block on cross-origin POSTs.
+  const res = await fetch('/api/v1/hub-proxy', {
     method:  'POST',
-    headers,
+    headers: { 'Content-Type': 'application/json' },
     body:    JSON.stringify(payload),
   });
 
+  const json = await res.json().catch(() => ({}));
+
   if (!res.ok) {
-    const raw = await res.text();
-    // Strip any HTML from the error message for clean display
-    const clean = raw.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300);
-    throw new Error(`CommunityHub POST ${res.status}: ${clean}`);
+    throw new Error(json.error || `Proxy error ${res.status}`);
   }
 
-  const json = await res.json();
-  // Hub may return { id } or { post: { id } } — handle both
-  return { id: json.id ?? json.post?.id ?? 0 };
+  return { id: json.id ?? 0 };
 }
