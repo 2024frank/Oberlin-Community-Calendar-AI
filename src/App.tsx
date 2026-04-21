@@ -1177,13 +1177,158 @@ export default function App() {
               )}
 
               {activeTab === 'analytics' && (
-                <motion.div 
+                <motion.div
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -10 }}
                   key="analytics"
                   className="space-y-8"
                 >
+
+                  {/* ── AI AGENT PERFORMANCE ─────────────────────────────────── */}
+                  {(() => {
+                    const total = stagingEvents.length;
+                    if (total === 0) return null;
+
+                    // Quality score stats
+                    const scores = stagingEvents.map(e => e.quality_score);
+                    const avgScore = Math.round(scores.reduce((a,b) => a+b, 0) / total);
+                    const autoApproveRate = Math.round((stagingEvents.filter(e => e.quality_score >= autoApproveThreshold).length / total) * 100);
+
+                    // Field completeness — how many events have all 5 key fields AI fills
+                    const fullyEnriched = stagingEvents.filter(e =>
+                      e.description_short && e.geographic_scope !== 'unknown' &&
+                      e.tags?.length && e.organizer && e.audience
+                    ).length;
+                    const enrichmentRate = Math.round((fullyEnriched / total) * 100);
+
+                    // Score buckets for histogram
+                    const buckets = [
+                      { label: '0–20',  count: scores.filter(s => s <= 20).length,              color: '#EF4444' },
+                      { label: '21–40', count: scores.filter(s => s > 20 && s <= 40).length,    color: '#F97316' },
+                      { label: '41–60', count: scores.filter(s => s > 40 && s <= 60).length,    color: '#EAB308' },
+                      { label: '61–80', count: scores.filter(s => s > 60 && s <= 80).length,    color: '#84CC16' },
+                      { label: '81–100',count: scores.filter(s => s > 80).length,               color: '#10B981' },
+                    ];
+
+                    // Geographic scope distribution
+                    const geoMap: Record<string,number> = {};
+                    stagingEvents.forEach(e => {
+                      const g = e.ai_geographic_scope || e.geographic_scope || 'unknown';
+                      geoMap[g] = (geoMap[g] || 0) + 1;
+                    });
+                    const geoColors: Record<string,string> = {
+                      hyperlocal: '#C41230', city: '#7C3AED', lorain_county: '#2563EB',
+                      northeast_ohio: '#0891B2', state: '#059669', national: '#D97706', online: '#6B7280', unknown: '#E5E7EB'
+                    };
+
+                    // Per-source avg quality
+                    const sourceMap: Record<string,number[]> = {};
+                    stagingEvents.forEach(e => {
+                      if (!sourceMap[e.source]) sourceMap[e.source] = [];
+                      sourceMap[e.source].push(e.quality_score);
+                    });
+                    const sourceQuality = Object.entries(sourceMap)
+                      .map(([src, sc]) => ({ src, avg: Math.round(sc.reduce((a,b)=>a+b,0)/sc.length), count: sc.length }))
+                      .sort((a,b) => b.avg - a.avg);
+
+                    // Duplicate detection AI performance
+                    const hubChecked = stagingEvents.filter(e => e.communityHubStatus && e.communityHubStatus !== 'unknown').length;
+                    const hubDetected = stagingEvents.filter(e => e.communityHubStatus === 'exists').length;
+                    const detectionRate = hubChecked > 0 ? Math.round((hubDetected / hubChecked) * 100) : 0;
+
+                    return (
+                      <div className="bg-gray-950 rounded-[40px] p-10 text-white shadow-2xl space-y-10">
+                        {/* Header */}
+                        <div className="flex items-start justify-between">
+                          <div>
+                            <div className="text-[10px] font-black uppercase tracking-[0.3em] text-crimson mb-2">Research Instrument</div>
+                            <h2 className="text-3xl font-black italic tracking-tighter uppercase">AI Agent Performance</h2>
+                            <p className="text-[11px] text-gray-500 font-bold uppercase tracking-widest mt-1">
+                              {total} events · GPT-4o extraction · text-embedding-3-small deduplication
+                            </p>
+                          </div>
+                          <div className="flex flex-col items-end gap-1">
+                            <div className="text-5xl font-black text-white">{avgScore}<span className="text-xl text-gray-500">/100</span></div>
+                            <div className="text-[10px] font-black uppercase tracking-widest text-gray-500">Avg Quality Score</div>
+                          </div>
+                        </div>
+
+                        {/* Top KPI row */}
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                          {[
+                            { label: 'Auto-Approve Rate', value: `${autoApproveRate}%`, sub: `≥${autoApproveThreshold} threshold`, color: 'text-emerald-400' },
+                            { label: 'Field Enrichment', value: `${enrichmentRate}%`, sub: 'fully enriched events', color: 'text-violet-400' },
+                            { label: 'Duplicate Detection', value: `${detectionRate}%`, sub: `${hubDetected} dupes found`, color: 'text-blue-400' },
+                            { label: 'Events Processed', value: total.toLocaleString(), sub: `${sourceQuality.length} sources`, color: 'text-crimson' },
+                          ].map(({ label, value, sub, color }) => (
+                            <div key={label} className="bg-white/5 border border-white/10 rounded-3xl p-6">
+                              <div className={`text-3xl font-black ${color}`}>{value}</div>
+                              <div className="text-[10px] font-black uppercase tracking-widest text-white mt-1">{label}</div>
+                              <div className="text-[10px] text-gray-500 mt-0.5">{sub}</div>
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* Quality score histogram */}
+                        <div>
+                          <div className="text-[10px] font-black uppercase tracking-widest text-gray-500 mb-4">Quality Score Distribution</div>
+                          <div className="flex items-end gap-3 h-28">
+                            {buckets.map(b => {
+                              const pct = total > 0 ? (b.count / total) * 100 : 0;
+                              return (
+                                <div key={b.label} className="flex-1 flex flex-col items-center gap-2">
+                                  <div className="text-[10px] font-black text-gray-400">{b.count}</div>
+                                  <div className="w-full rounded-t-xl transition-all" style={{ height: `${Math.max(pct * 0.8, 4)}px`, backgroundColor: b.color, opacity: 0.85 }} />
+                                  <div className="text-[9px] font-black uppercase tracking-wider text-gray-600">{b.label}</div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                          {/* Geographic scope breakdown */}
+                          <div>
+                            <div className="text-[10px] font-black uppercase tracking-widest text-gray-500 mb-4">AI Geographic Classification</div>
+                            <div className="space-y-2.5">
+                              {Object.entries(geoMap).sort((a,b)=>b[1]-a[1]).map(([scope, count]) => {
+                                const pct = Math.round((count/total)*100);
+                                return (
+                                  <div key={scope} className="flex items-center gap-3">
+                                    <div className="w-24 text-[10px] font-black uppercase tracking-wider text-gray-500 truncate">{scope.replace('_',' ')}</div>
+                                    <div className="flex-1 h-2 bg-white/10 rounded-full overflow-hidden">
+                                      <div className="h-full rounded-full transition-all" style={{ width:`${pct}%`, backgroundColor: geoColors[scope] || '#6B7280' }} />
+                                    </div>
+                                    <div className="text-[10px] font-black text-gray-400 w-10 text-right">{pct}%</div>
+                                    <div className="text-[10px] text-gray-600 w-6 text-right">{count}</div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+
+                          {/* Source quality ranking */}
+                          <div>
+                            <div className="text-[10px] font-black uppercase tracking-widest text-gray-500 mb-4">Source Quality Ranking</div>
+                            <div className="space-y-2.5">
+                              {sourceQuality.map(({ src, avg, count }) => (
+                                <div key={src} className="flex items-center gap-3">
+                                  <div className="flex-1 text-[10px] font-black uppercase tracking-wider text-gray-400 truncate">{src}</div>
+                                  <div className="w-28 h-2 bg-white/10 rounded-full overflow-hidden">
+                                    <div className="h-full bg-crimson rounded-full" style={{ width:`${avg}%`, opacity: 0.7 + avg/300 }} />
+                                  </div>
+                                  <div className="text-[11px] font-black text-white w-8 text-right">{avg}</div>
+                                  <div className="text-[10px] text-gray-600 w-6 text-right">{count}</div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
                     <MetricCard title="Total Events" value={stagingEvents.length} icon={Database} />
                     <MetricCard title="Approved" value={approvedCount} icon={CheckCircle2} trend="Real-time" />
