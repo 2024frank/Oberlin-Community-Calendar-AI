@@ -131,6 +131,9 @@ export default function App() {
 
   const [editingEvent, setEditingEvent] = useState<StagingEvent | null>(null);
   const [selectedSources, setSelectedSources] = useState<Set<string>>(new Set());
+  const [sendingToHub, setSendingToHub] = useState<Set<string>>(new Set()); // event IDs in flight
+  const [isBulkSending, setIsBulkSending] = useState(false);
+  const [hubPushProgress, setHubPushProgress] = useState<{ sent: number; total: number } | null>(null);
   const [autoApprove, setAutoApprove] = useState<boolean>(() => localStorage.getItem('auto_approve') === 'true');
   const [autoApproveThreshold, setAutoApproveThreshold] = useState<number>(() => Number(localStorage.getItem('auto_approve_threshold') || 80));
 
@@ -346,6 +349,8 @@ export default function App() {
   };
 
   const handleSendToHub = async (event: StagingEvent) => {
+    setSendingToHub(prev => new Set(prev).add(event.id));
+    setLastLog(`Sending "${event.title}" to CommunityHub...`);
     try {
       await postToCommunityHub(event);
 
@@ -353,8 +358,6 @@ export default function App() {
       databaseService.remove(event.id);
       const remaining = databaseService.getAll();
       setStagingEvents(remaining);
-
-      // Sync the removal to Redis so the event is gone from the backend too
       await syncToDatabase(remaining);
 
       setLastLog(`✓ "${event.title}" sent to CommunityHub & cleared from database`);
@@ -362,6 +365,8 @@ export default function App() {
       const msg = err instanceof Error ? err.message : String(err);
       const clean = msg.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim().slice(0, 250);
       setLastLog(`CommunityHub error: ${clean}`);
+    } finally {
+      setSendingToHub(prev => { const s = new Set(prev); s.delete(event.id); return s; });
     }
   };
 
@@ -375,32 +380,39 @@ export default function App() {
       setLastLog('No approved events left to push (all already on Hub or none approved).');
       return;
     }
+
+    setIsBulkSending(true);
+    setHubPushProgress({ sent: 0, total: toSend.length });
     setLastLog(`Pushing ${toSend.length} approved events to CommunityHub...`);
     let sent = 0;
     let failed = 0;
 
     for (const event of toSend) {
+      setSendingToHub(prev => new Set(prev).add(event.id));
       try {
         await postToCommunityHub(event);
-        // Remove each one immediately after success
         databaseService.remove(event.id);
         sent++;
-        setLastLog(`Pushed ${sent}/${toSend.length} · "${event.title}" cleared from DB`);
+        setHubPushProgress({ sent, total: toSend.length });
+        setLastLog(`Pushing to CommunityHub · ${sent}/${toSend.length} done · "${event.title}"`);
       } catch (err) {
         failed++;
         const msg = err instanceof Error ? err.message : String(err);
         const clean = msg.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim().slice(0, 150);
         console.error(`Hub push failed for "${event.title}": ${clean}`);
+      } finally {
+        setSendingToHub(prev => { const s = new Set(prev); s.delete(event.id); return s; });
       }
     }
 
-    // Sync whatever remains to Redis in one shot
     const remaining = databaseService.getAll();
     setStagingEvents(remaining);
     await syncToDatabase(remaining);
 
+    setIsBulkSending(false);
+    setHubPushProgress(null);
     const failMsg = failed > 0 ? ` · ${failed} failed` : '';
-    setLastLog(`✓ Bulk push done: ${sent} sent to CommunityHub & cleared from DB${failMsg}`);
+    setLastLog(`✓ Done: ${sent} sent to CommunityHub & cleared from DB${failMsg}`);
   };
 
   const updateSourceFrequency = (id: string, frequency: number) => {
@@ -499,6 +511,46 @@ export default function App() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#F9FAFB]">
+
+      {/* ── CommunityHub push toast ───────────────────────────────────────── */}
+      {(isBulkSending || sendingToHub.size > 0) && (
+        <div className="fixed bottom-6 right-6 z-50 flex flex-col gap-2 pointer-events-none">
+          <div className="flex items-center gap-3 px-5 py-4 bg-gray-950 text-white rounded-2xl shadow-2xl min-w-[280px]">
+            {/* Animated ring */}
+            <div className="relative flex-shrink-0 w-8 h-8">
+              <svg className="animate-spin w-8 h-8" viewBox="0 0 32 32" fill="none">
+                <circle cx="16" cy="16" r="13" stroke="white" strokeOpacity="0.15" strokeWidth="3"/>
+                <path d="M16 3a13 13 0 0 1 13 13" stroke="#a78bfa" strokeWidth="3" strokeLinecap="round"/>
+              </svg>
+              <div className="absolute inset-0 flex items-center justify-center">
+                <div className="w-2.5 h-2.5 rounded-full bg-violet-400 animate-pulse"/>
+              </div>
+            </div>
+            <div className="flex flex-col gap-0.5 min-w-0">
+              <span className="text-[11px] font-black uppercase tracking-widest text-violet-300">
+                Pushing to CommunityHub
+              </span>
+              {isBulkSending && hubPushProgress ? (
+                <>
+                  <span className="text-[13px] font-semibold text-white">
+                    {hubPushProgress.sent} of {hubPushProgress.total} events sent
+                  </span>
+                  <div className="mt-1 w-full bg-white/10 rounded-full h-1 overflow-hidden">
+                    <div
+                      className="bg-violet-400 h-1 rounded-full transition-all duration-500"
+                      style={{ width: `${Math.round((hubPushProgress.sent / hubPushProgress.total) * 100)}%` }}
+                    />
+                  </div>
+                </>
+              ) : (
+                <span className="text-[13px] font-semibold text-white truncate">
+                  {lastLog.replace('Sending "', '').replace('" to CommunityHub...', '') || 'Connecting...'}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       {/* Sidebar */}
       <motion.aside 
         initial={false}
@@ -733,15 +785,42 @@ export default function App() {
                       const unsent = stagingEvents.filter(
                         e => e.review_status === 'approved' && e.communityHubStatus !== 'sent' && e.communityHubStatus !== 'exists'
                       );
-                      return unsent.length > 0 ? (
-                        <button
-                          onClick={handleBulkSendToHub}
-                          className="flex items-center gap-2 px-5 py-3 bg-blue-500 text-white text-[11px] font-black uppercase tracking-widest rounded-2xl hover:bg-blue-600 transition-all shadow-lg"
-                        >
-                          <ExternalLink size={14} />
-                          Push All to CommunityHub ({unsent.length})
-                        </button>
-                      ) : null;
+                      if (unsent.length === 0) return null;
+                      return (
+                        <div className="flex flex-col items-end gap-1.5">
+                          <button
+                            onClick={handleBulkSendToHub}
+                            disabled={isBulkSending}
+                            className="flex items-center gap-2 px-5 py-3 bg-violet-500 text-white text-[11px] font-black uppercase tracking-widest rounded-2xl hover:bg-violet-600 transition-all shadow-lg disabled:opacity-80 disabled:cursor-not-allowed"
+                          >
+                            {isBulkSending ? (
+                              <>
+                                <svg className="animate-spin" width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3}>
+                                  <circle cx="12" cy="12" r="10" strokeOpacity="0.3"/>
+                                  <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round"/>
+                                </svg>
+                                {hubPushProgress
+                                  ? `Sending ${hubPushProgress.sent}/${hubPushProgress.total}...`
+                                  : 'Sending...'}
+                              </>
+                            ) : (
+                              <>
+                                <ExternalLink size={14} />
+                                Push All to CommunityHub ({unsent.length})
+                              </>
+                            )}
+                          </button>
+                          {/* Progress bar during bulk push */}
+                          {isBulkSending && hubPushProgress && (
+                            <div className="w-full bg-violet-100 rounded-full h-1.5 overflow-hidden">
+                              <div
+                                className="bg-violet-500 h-1.5 rounded-full transition-all duration-300"
+                                style={{ width: `${(hubPushProgress.sent / hubPushProgress.total) * 100}%` }}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      );
                     })()}
                   </div>
 
@@ -929,9 +1008,20 @@ export default function App() {
                                   {isApproved && !hubExists && !hubSent && (
                                     <button
                                       onClick={() => handleSendToHub(event)}
-                                      className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-violet-500 text-white text-[11px] font-black uppercase tracking-widest hover:bg-violet-600 transition-all active:scale-95"
+                                      disabled={sendingToHub.has(event.id)}
+                                      className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-violet-500 text-white text-[11px] font-black uppercase tracking-widest hover:bg-violet-600 transition-all active:scale-95 disabled:opacity-70 disabled:cursor-not-allowed"
                                     >
-                                      <Send size={13}/> Send to Hub
+                                      {sendingToHub.has(event.id) ? (
+                                        <>
+                                          <svg className="animate-spin" width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3}>
+                                            <circle cx="12" cy="12" r="10" strokeOpacity="0.3"/>
+                                            <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round"/>
+                                          </svg>
+                                          Sending...
+                                        </>
+                                      ) : (
+                                        <><Send size={13}/> Send to Hub</>
+                                      )}
                                     </button>
                                   )}
 
