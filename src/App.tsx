@@ -131,12 +131,17 @@ export default function App() {
 
   const [editingEvent, setEditingEvent] = useState<StagingEvent | null>(null);
   const [selectedSources, setSelectedSources] = useState<Set<string>>(new Set());
-  const [sendingToHub, setSendingToHub] = useState<Set<string>>(new Set()); // event IDs in flight
+  const [sendingToHub, setSendingToHub] = useState<Set<string>>(new Set());
   const [isBulkSending, setIsBulkSending] = useState(false);
   const [hubPushProgress, setHubPushProgress] = useState<{ sent: number; total: number } | null>(null);
-  // Ref-based guards — checked synchronously so React's async state batching can't cause double-fires
+  const [pushResult, setPushResult] = useState<{ sent: number; failed: number; errors: string[] } | null>(null);
+  // Ref-based guards — synchronous, immune to React batching delays
   const bulkSendingRef = React.useRef(false);
   const sendingIdsRef  = React.useRef(new Set<string>());
+  // Persisted set of event IDs already pushed — survives re-renders, prevents double-push
+  const pushedIdsRef   = React.useRef<Set<string>>(
+    new Set(JSON.parse(localStorage.getItem('hub_pushed_ids') || '[]'))
+  );
   const [autoApprove, setAutoApprove] = useState<boolean>(() => localStorage.getItem('auto_approve') === 'true');
   const [autoApproveThreshold, setAutoApproveThreshold] = useState<number>(() => Number(localStorage.getItem('auto_approve_threshold') || 80));
 
@@ -351,22 +356,35 @@ export default function App() {
     }
   };
 
+  const markPushed = (id: string) => {
+    pushedIdsRef.current.add(id);
+    localStorage.setItem('hub_pushed_ids', JSON.stringify([...pushedIdsRef.current]));
+  };
+
   const handleSendToHub = async (event: StagingEvent) => {
-    // Synchronous guard — prevents double-send even if React batches state
+    // Triple-layer duplicate guard
     if (sendingIdsRef.current.has(event.id)) return;
+    if (pushedIdsRef.current.has(event.id)) {
+      setLastLog(`"${event.title}" was already pushed to CommunityHub — skipping to prevent duplicate.`);
+      return;
+    }
     sendingIdsRef.current.add(event.id);
     setSendingToHub(prev => new Set(prev).add(event.id));
+    setPushResult(null);
     setLastLog(`Sending "${event.title}" to CommunityHub...`);
     try {
       await postToCommunityHub(event);
+      markPushed(event.id);                         // persist immediately
       databaseService.remove(event.id);
       const remaining = databaseService.getAll();
       setStagingEvents(remaining);
       await syncToDatabase(remaining);
-      setLastLog(`✓ "${event.title}" sent to CommunityHub & cleared from database`);
+      setPushResult({ sent: 1, failed: 0, errors: [] });
+      setLastLog(`✓ "${event.title}" sent to CommunityHub`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      const clean = msg.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim().slice(0, 250);
+      const clean = msg.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim().slice(0, 300);
+      setPushResult({ sent: 0, failed: 1, errors: [clean] });
       setLastLog(`CommunityHub error: ${clean}`);
     } finally {
       sendingIdsRef.current.delete(event.id);
@@ -375,41 +393,45 @@ export default function App() {
   };
 
   const handleBulkSendToHub = async () => {
-    // Synchronous guard — if already running, do nothing
     if (bulkSendingRef.current) return;
     bulkSendingRef.current = true;
+    setPushResult(null);
 
     const toSend = stagingEvents.filter(
       e => e.review_status === 'approved' &&
            e.communityHubStatus !== 'sent' &&
            e.communityHubStatus !== 'exists' &&
-           !sendingIdsRef.current.has(e.id)   // skip anything already mid-send
+           !sendingIdsRef.current.has(e.id) &&
+           !pushedIdsRef.current.has(e.id)     // skip already-pushed events
     );
     if (toSend.length === 0) {
       bulkSendingRef.current = false;
-      setLastLog('No approved events left to push (all already on Hub or none approved).');
+      setLastLog('No approved events to push — all already sent or none approved.');
       return;
     }
 
     setIsBulkSending(true);
     setHubPushProgress({ sent: 0, total: toSend.length });
-    setLastLog(`Pushing ${toSend.length} approved events to CommunityHub...`);
+    setLastLog(`Pushing ${toSend.length} events to CommunityHub...`);
     let sent = 0;
     let failed = 0;
+    const errors: string[] = [];
 
     for (const event of toSend) {
       sendingIdsRef.current.add(event.id);
       setSendingToHub(prev => new Set(prev).add(event.id));
       try {
         await postToCommunityHub(event);
+        markPushed(event.id);                       // persist before removing
         databaseService.remove(event.id);
         sent++;
         setHubPushProgress({ sent, total: toSend.length });
-        setLastLog(`Pushing to CommunityHub · ${sent}/${toSend.length} done · "${event.title}"`);
+        setLastLog(`Pushed ${sent}/${toSend.length} · "${event.title}"`);
       } catch (err) {
         failed++;
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(`Hub push failed for "${event.title}":`, msg.replace(/<[^>]*>/g, '').slice(0, 150));
+        const msg = (err instanceof Error ? err.message : String(err))
+          .replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim().slice(0, 200);
+        errors.push(`"${event.title}": ${msg}`);
       } finally {
         sendingIdsRef.current.delete(event.id);
         setSendingToHub(prev => { const s = new Set(prev); s.delete(event.id); return s; });
@@ -423,8 +445,12 @@ export default function App() {
     bulkSendingRef.current = false;
     setIsBulkSending(false);
     setHubPushProgress(null);
-    const failMsg = failed > 0 ? ` · ${failed} failed` : '';
-    setLastLog(`✓ Done: ${sent} sent to CommunityHub & cleared from DB${failMsg}`);
+    setPushResult({ sent, failed, errors });
+    setLastLog(
+      failed === 0
+        ? `✓ All ${sent} events pushed to CommunityHub successfully`
+        : `Done: ${sent} sent · ${failed} failed`
+    );
   };
 
   /** Load approved events from Redis into the local staging DB + UI */
@@ -572,6 +598,34 @@ export default function App() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#F9FAFB]">
+
+      {/* ── Push result banner — stays visible until dismissed ───────────── */}
+      {pushResult && !isBulkSending && sendingToHub.size === 0 && (
+        <div className={`fixed bottom-6 right-6 z-50 flex items-start gap-4 px-5 py-4 rounded-2xl shadow-2xl min-w-[300px] max-w-[420px] ${pushResult.failed === 0 ? 'bg-emerald-600' : pushResult.sent === 0 ? 'bg-rose-600' : 'bg-amber-500'} text-white`}>
+          <div className="text-2xl mt-0.5">
+            {pushResult.failed === 0 ? '✓' : pushResult.sent === 0 ? '✕' : '⚠'}
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-[12px] font-black uppercase tracking-widest opacity-80 mb-1">
+              CommunityHub Push Result
+            </p>
+            {pushResult.sent > 0 && (
+              <p className="text-[14px] font-bold">{pushResult.sent} event{pushResult.sent !== 1 ? 's' : ''} sent successfully</p>
+            )}
+            {pushResult.failed > 0 && (
+              <p className="text-[14px] font-bold">{pushResult.failed} failed to push</p>
+            )}
+            {pushResult.errors.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {pushResult.errors.slice(0, 3).map((e, i) => (
+                  <p key={i} className="text-[11px] opacity-90 break-words">{e}</p>
+                ))}
+              </div>
+            )}
+          </div>
+          <button onClick={() => setPushResult(null)} className="text-white/70 hover:text-white text-lg leading-none mt-0.5">✕</button>
+        </div>
+      )}
 
       {/* ── CommunityHub push toast ───────────────────────────────────────── */}
       {(isBulkSending || sendingToHub.size > 0) && (
