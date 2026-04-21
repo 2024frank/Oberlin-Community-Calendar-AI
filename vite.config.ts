@@ -8,7 +8,8 @@ export default defineConfig(({mode}) => {
   return {
     plugins: [react(), tailwindcss()],
     define: {
-      'process.env.OPENAI_API_KEY': JSON.stringify(env.OPENAI_API_KEY),
+      // Support both OPENAI_API_KEY (local) and VITE_OPENAI_API_KEY (Vercel build-time)
+      'process.env.OPENAI_API_KEY': JSON.stringify(env.VITE_OPENAI_API_KEY || env.OPENAI_API_KEY),
     },
     resolve: {
       alias: {

@@ -1,25 +1,38 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import express from "express";
-import path from "path";
-import fs from "fs";
+import { Redis } from "@upstash/redis";
 
-const DATA_FILE =
-  process.env.DATA_FILE_PATH ||
-  (process.env.RENDER_DISK_PATH
-    ? path.join(process.env.RENDER_DISK_PATH, "approved_events.json")
-    : path.join(process.cwd(), "approved_events.json"));
+const EVENTS_KEY = "approved_events";
 
-const getApprovedEvents = (): unknown[] => {
-  if (fs.existsSync(DATA_FILE)) {
-    return JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+function getRedis(): Redis | null {
+  if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
+    return new Redis({
+      url: process.env.UPSTASH_REDIS_REST_URL,
+      token: process.env.UPSTASH_REDIS_REST_TOKEN,
+    });
   }
-  return [];
-};
+  return null;
+}
 
-const saveApprovedEvents = (events: unknown[]) => {
-  fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
-  fs.writeFileSync(DATA_FILE, JSON.stringify(events, null, 2));
-};
+// In-memory fallback for local dev (no Redis configured)
+let memoryStore: unknown[] = [];
+
+async function loadEvents(): Promise<unknown[]> {
+  const redis = getRedis();
+  if (redis) {
+    return (await redis.get<unknown[]>(EVENTS_KEY)) ?? [];
+  }
+  return memoryStore;
+}
+
+async function saveEvents(events: unknown[]): Promise<void> {
+  const redis = getRedis();
+  if (redis) {
+    await redis.set(EVENTS_KEY, events);
+  } else {
+    memoryStore = events;
+  }
+}
 
 /** Comma-separated list of allowed browser origins (e.g. your static site URL). */
 export function setupCors(app: Express) {
@@ -56,13 +69,13 @@ export function attachResearchApi(app: Express) {
     res.json({ ok: true });
   });
 
-  app.post("/api/v1/sync", (req, res) => {
+  app.post("/api/v1/sync", async (req, res) => {
     const { events } = req.body as { events?: unknown[] };
-    saveApprovedEvents(events || []);
+    await saveEvents(events || []);
     res.json({ status: "synced", count: (events || []).length });
   });
 
-  app.get("/api/v1/approved-events", (req, res) => {
+  app.get("/api/v1/approved-events", async (req, res) => {
     const token = req.headers.authorization;
     const expectedToken = process.env.API_ACCESS_TOKEN || "oberlin_research_2026";
 
@@ -70,7 +83,7 @@ export function attachResearchApi(app: Express) {
       return res.status(401).json({ error: "Unauthorized. Missing or invalid research token." });
     }
 
-    const events = getApprovedEvents();
+    const events = await loadEvents();
     res.json({
       count: events.length,
       timestamp: new Date().toISOString(),

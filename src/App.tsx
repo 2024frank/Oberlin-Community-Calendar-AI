@@ -4,15 +4,15 @@
  */
 
 import React, { useState, useMemo, useEffect } from 'react';
-import { 
-  LayoutDashboard, 
-  Calendar, 
-  Database, 
-  CheckCircle2, 
-  Clock, 
-  BarChart3, 
-  Search, 
-  Plus, 
+import {
+  LayoutDashboard,
+  Calendar,
+  Database,
+  CheckCircle2,
+  Clock,
+  BarChart3,
+  Search,
+  Plus,
   MoreVertical,
   ExternalLink,
   MapPin,
@@ -29,9 +29,15 @@ import {
   X,
   RotateCcw,
   Menu,
-  ChevronLeft
+  ChevronLeft,
+  Check,
+  Ban,
+  Send,
+  Pencil,
+  Globe
 } from 'lucide-react';
-import { extractEventsFromText } from './services/aiService';
+import { extractEventsFromText, enrichEventFields } from './services/aiService';
+import { enrichWithHubStatus, postToCommunityHub } from './services/communityHubService';
 import { AIPulse } from './components/AIPulse';
 import { 
   BarChart, 
@@ -49,6 +55,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { StagingEvent, Source, MetricPoint } from './types';
 import { fetchLocalistEvents, fetchHeritageCenterEvents } from './services/localistAdapter';
+import { scrapeSource } from './services/scrapeAdapter';
 import { databaseService } from './services/databaseService';
 import { calculateQualityScore } from './services/normalizationService';
 import { cn } from './lib/utils';
@@ -56,14 +63,14 @@ import { apiUrl } from './lib/apiBase';
 
 // --- Sample Data ---
 const INITIAL_SOURCES: Source[] = [
-  { id: 'oberlin-college', name: 'Oberlin College and Conservatory', url: 'calendar.oberlin.edu', adapter: 'Localist v2', category: 'Institutional', lastScanned: '2026-04-18T10:00:00Z', status: 'active', frequency: 60 },
-  { id: 'oberlin-heritage', name: 'Heritage Society', url: 'oberlinheritagecenter.org', adapter: 'WP-AJAX', category: 'History', lastScanned: '2026-04-18T12:00:00Z', status: 'active', frequency: 1440 },
-  { id: 'amam', name: 'AMAM', url: 'amam.oberlin.edu', adapter: 'Drupal', category: 'Art', lastScanned: '2026-04-18T10:00:00Z', status: 'active', frequency: 720 },
-  { id: 'city-oberlin', name: 'City of Oberlin', url: 'cityofoberlin.com', adapter: 'HTML', category: 'Municipal', lastScanned: '2026-04-18T10:00:00Z', status: 'active', frequency: 720 },
-  { id: 'fava', name: 'FAVA', url: 'favagallery.org', adapter: 'WP', category: 'Art', lastScanned: '2026-04-18T10:00:00Z', status: 'active', frequency: 1440 },
-  { id: 'apollo', name: 'Apollo Theatre', url: 'apollotheatre.org', adapter: 'HTML', category: 'Entertainment', lastScanned: '2026-04-18T10:00:00Z', status: 'active', frequency: 720 },
-  { id: 'obp', name: 'Oberlin Business Partnership', url: 'oberlin.org', adapter: 'HTML', category: 'Business', lastScanned: '2026-04-18T10:00:00Z', status: 'active', frequency: 1440 },
-  { id: 'library', name: 'Oberlin Public Library', url: 'oberlinlibrary.org', adapter: 'HTML', category: 'Public Service', lastScanned: '2026-04-18T10:00:00Z', status: 'active', frequency: 720 }
+  { id: 'oberlin-college', name: 'Oberlin College and Conservatory', url: 'calendar.oberlin.edu', adapter: 'Localist v2', category: 'Institutional', lastScanned: undefined, status: 'active', frequency: 60 },
+  { id: 'oberlin-heritage', name: 'Heritage Society', url: 'oberlinheritagecenter.org', adapter: 'WP-AJAX', category: 'History', lastScanned: undefined, status: 'active', frequency: 1440 },
+  { id: 'amam', name: 'AMAM', url: 'amam.oberlin.edu', eventsUrl: 'https://amam.oberlin.edu/events', adapter: 'AI Scrape', category: 'Art', lastScanned: undefined, status: 'active', frequency: 720 },
+  { id: 'city-oberlin', name: 'City of Oberlin', url: 'cityofoberlin.com', eventsUrl: 'https://www.cityofoberlin.com/calendar-of-events/', adapter: 'AI Scrape', category: 'Municipal', lastScanned: undefined, status: 'active', frequency: 720 },
+  { id: 'fava', name: 'FAVA', url: 'favagallery.org', eventsUrl: 'https://www.favagallery.org/events/', adapter: 'AI Scrape', category: 'Art', lastScanned: undefined, status: 'active', frequency: 1440 },
+  { id: 'apollo', name: 'Apollo Theatre', url: 'apollotheatre.org', eventsUrl: 'https://apollotheatre.org/events/', adapter: 'AI Scrape', category: 'Entertainment', lastScanned: undefined, status: 'active', frequency: 720 },
+  { id: 'obp', name: 'Oberlin Business Partnership', url: 'oberlin.org', eventsUrl: 'https://www.oberlin.org/events', adapter: 'AI Scrape', category: 'Business', lastScanned: undefined, status: 'active', frequency: 1440 },
+  { id: 'library', name: 'Oberlin Public Library', url: 'oberlinlibrary.org', eventsUrl: 'https://www.oberlinlibrary.org/events', adapter: 'AI Scrape', category: 'Public Service', lastScanned: undefined, status: 'active', frequency: 720 },
 ];
 
 const SOURCE_COLORS: Record<string, string> = {
@@ -123,6 +130,39 @@ export default function App() {
   const [isEvaluating, setIsEvaluating] = useState(false);
 
   const [editingEvent, setEditingEvent] = useState<StagingEvent | null>(null);
+  const [selectedSources, setSelectedSources] = useState<Set<string>>(new Set());
+  const [autoApprove, setAutoApprove] = useState<boolean>(() => localStorage.getItem('auto_approve') === 'true');
+  const [autoApproveThreshold, setAutoApproveThreshold] = useState<number>(() => Number(localStorage.getItem('auto_approve_threshold') || 80));
+
+  const toggleSource = (source: string) =>
+    setSelectedSources(prev => {
+      const next = new Set(prev);
+      next.has(source) ? next.delete(source) : next.add(source);
+      return next;
+    });
+
+  const toggleAutoApprove = () =>
+    setAutoApprove(v => { const next = !v; localStorage.setItem('auto_approve', String(next)); return next; });
+
+  const changeThreshold = (v: number) => {
+    setAutoApproveThreshold(v);
+    localStorage.setItem('auto_approve_threshold', String(v));
+  };
+
+  const applyAutoApproveNow = async () => {
+    const all = databaseService.getAll();
+    let count = 0;
+    all.forEach(e => {
+      if (e.quality_score >= autoApproveThreshold && e.review_status !== 'approved' && e.review_status !== 'rejected') {
+        databaseService.updateStatus(e.id, 'approved');
+        count++;
+      }
+    });
+    const updated = databaseService.getAll();
+    setStagingEvents(updated);
+    await syncToDatabase(updated);
+    setLastLog(`✓ ${count} events auto-approved · synced to database`);
+  };
 
   const [researchInsight, setResearchInsight] = useState<{ observation: string, recommendation: string }>({
     observation: '92% of rejected items are due to "Missing Coordinates" or "Generic Heritage Tags".',
@@ -130,23 +170,38 @@ export default function App() {
   });
   const [isInsightLoading, setIsInsightLoading] = useState(false);
 
-  // Hydrate from localStorage on mount
+  // Hydrate from localStorage on mount — strip any stale CommunityHub source events
   useEffect(() => {
-    setStagingEvents(databaseService.getAll());
+    const all = databaseService.getAll();
+    const cleaned = all.filter(e => e.source !== 'CommunityHub');
+    if (cleaned.length !== all.length) {
+      localStorage.setItem('civicfeed_staging_events', JSON.stringify(cleaned));
+    }
+    setStagingEvents(cleaned);
   }, []);
 
+  // Real extraction data: events grouped by source, derived from actual staging events
   const extractionData = useMemo(() => {
-    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-    return days.map(day => ({
-      date: day,
-      events: Math.floor(Math.random() * 15) + 5,
-      source: INITIAL_SOURCES[Math.floor(Math.random() * INITIAL_SOURCES.length)].name
-    }));
-  }, []);
+    if (stagingEvents.length === 0) return [];
+    const counts: Record<string, number> = {};
+    stagingEvents.forEach(e => {
+      counts[e.source] = (counts[e.source] || 0) + 1;
+    });
+    return Object.entries(counts).map(([source, events]) => ({ date: source, events, source }));
+  }, [stagingEvents]);
 
-  const pendingCount = useMemo(() => 
-    stagingEvents.filter(e => e.review_status === 'needs_review' || e.review_status === 'ready').length, 
+  const pendingCount = useMemo(() =>
+    stagingEvents.filter(e => e.review_status === 'needs_review' || e.review_status === 'ready').length,
   [stagingEvents]);
+
+  const dupStats = useMemo(() => {
+    const checked = stagingEvents.filter(e => e.communityHubStatus && e.communityHubStatus !== 'unknown');
+    const exists  = stagingEvents.filter(e => e.communityHubStatus === 'exists').length;
+    const sent    = stagingEvents.filter(e => e.communityHubStatus === 'sent').length;
+    const isNew   = stagingEvents.filter(e => e.communityHubStatus === 'new').length;
+    const dupeRate = checked.length > 0 ? ((exists / checked.length) * 100).toFixed(1) : '0.0';
+    return { exists, sent, isNew, checked: checked.length, dupeRate };
+  }, [stagingEvents]);
 
   const approvedCount = useMemo(() => 
     stagingEvents.filter(e => e.review_status === 'approved').length, 
@@ -156,19 +211,22 @@ export default function App() {
     stagingEvents.filter(e => e.review_status === 'rejected').length, 
   [stagingEvents]);
 
-  // Sync approved events to the research API (separate backend on Render can spin down when idle)
-  useEffect(() => {
-    const approved = stagingEvents.filter((e) => e.review_status === "approved");
-    fetch(apiUrl("/api/v1/sync"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ events: approved }),
-    }).catch((err) => console.error("Failed to sync with research server", err));
-  }, [stagingEvents]);
+  // Push all approved events to Redis database
+  const syncToDatabase = async (events?: StagingEvent[]) => {
+    const toSync = (events ?? stagingEvents).filter(e => e.review_status === 'approved');
+    if (toSync.length === 0) return;
+    await fetch(apiUrl('/api/v1/sync'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ events: toSync }),
+    });
+  };
 
   const handleApprove = (id: string) => {
     databaseService.updateStatus(id, 'approved');
-    setStagingEvents(databaseService.getAll());
+    const all = databaseService.getAll();
+    setStagingEvents(all);
+    syncToDatabase(all);
   };
 
   const handleReject = (id: string) => {
@@ -204,33 +262,124 @@ export default function App() {
 
   const handleIngestAll = async () => {
     setIsIngesting(true);
-    setLastLog('Initializing multi-source ingest sequence...');
+    const results: Record<string, number> = {};
     try {
-      setLastLog('Contacting Localist Infrastructure...');
-      const localist = await fetchLocalistEvents({ days: 14, pp: syncLimit });
-      
-      setLastLog('Contacting Heritage Center Gateway...');
-      const heritage = await fetchHeritageCenterEvents();
-      
-      const all = [...localist, ...heritage];
-      setLastLog(`Retrieved ${all.length} total events. Committing to research lake...`);
-      
-      const { inserted, updated } = databaseService.upsertMany(all);
-      setStagingEvents(databaseService.getAll());
-      setLastLog(`Ingestion complete: ${inserted} new, ${updated} reconciled.`);
+      // ── Step 1: Fetch native API sources in parallel ──────────────────────
+      setLastLog('Fetching Oberlin College & Heritage Center...');
+      const [localistRes, heritageRes] = await Promise.allSettled([
+        fetchLocalistEvents({ days: 90, pp: 100 }),
+        fetchHeritageCenterEvents(),
+      ]);
+      const localistEvents = localistRes.status === 'fulfilled' ? localistRes.value : [];
+      const heritageEvents = heritageRes.status === 'fulfilled' ? heritageRes.value : [];
+      results['Oberlin College Events'] = localistEvents.length;
+      results['Heritage Center']        = heritageEvents.length;
 
-      // Update lastScanned for the sources that were actually fetched
+      // ── Step 2: AI-scrape other active sources in parallel ────────────────
+      const scrapeSources = sources.filter(s => s.status === 'active' && s.eventsUrl);
+      if (scrapeSources.length > 0) {
+        setLastLog(`Scraping ${scrapeSources.length} additional sources with AI...`);
+        const scrapeResults = await Promise.allSettled(
+          scrapeSources.map(s => scrapeSource(s.eventsUrl!, s.name))
+        );
+        var scrapedEvents = scrapeResults.flatMap((r, i) => {
+          if (r.status === 'fulfilled') {
+            results[scrapeSources[i].name] = r.value.length;
+            return r.value;
+          }
+          console.error(`Scrape failed for ${scrapeSources[i].name}:`, r.reason);
+          results[scrapeSources[i].name] = 0;
+          return [];
+        });
+      } else {
+        var scrapedEvents: any[] = [];
+      }
+
+      // ── Step 3: Combine ───────────────────────────────────────────────────
+      const all = [...localistEvents, ...heritageEvents, ...scrapedEvents];
+      const summary = Object.entries(results).map(([k, v]) => `${v} ${k}`).join(' · ');
+      setLastLog(`Got ${all.length} events (${summary}). AI enriching fields & classifying regions...`);
+
+      // ── Step 4: AI field enrichment — fills missing fields, reclassifies geo scope, re-scores ──
+      const aiEnriched = await enrichEventFields(all);
+
+      // ── Step 5: Silent hub duplicate check (semantic embeddings) ─────────
+      setLastLog(`Fields enriched. Checking against CommunityHub for duplicates...`);
+      const enriched = await enrichWithHubStatus(aiEnriched);
+
+      // ── Step 6: Save (without touching review_status) ────────────────────
+      const { inserted, updated } = databaseService.upsertMany(enriched);
+
+      // ── Step 7: Auto-approve — runs AFTER upsert so it hits every event ──
+      let autoApproved = 0;
+      if (autoApprove) {
+        const allNow = databaseService.getAll();
+        allNow.forEach(e => {
+          if (
+            e.quality_score >= autoApproveThreshold &&
+            e.review_status !== 'approved' &&
+            e.review_status !== 'rejected'
+          ) {
+            databaseService.updateStatus(e.id, 'approved');
+            autoApproved++;
+          }
+        });
+      }
+
+      const finalAll = databaseService.getAll();
+      setStagingEvents(finalAll);
+
+      // Push approved events to Redis immediately
+      setLastLog('Syncing approved events to database...');
+      await syncToDatabase(finalAll);
+
+      const autoMsg = autoApprove ? ` · ${autoApproved} auto-approved` : '';
+      setLastLog(`✓ Done: ${inserted} new · ${updated} updated${autoMsg} · synced to DB`);
+
       const now = new Date().toISOString();
-      setSources(prev => prev.map(s =>
-        (s.id === 'oberlin-college' || s.id === 'oberlin-heritage')
-          ? { ...s, lastScanned: now }
-          : s
-      ));
+      setSources(prev => prev.map(s => ({ ...s, lastScanned: now })));
     } catch (error) {
-      setLastLog(`Critical Error: ${error instanceof Error ? error.message : 'Unknown failure'}`);
+      setLastLog(`Error: ${error instanceof Error ? error.message : 'Unknown failure'}`);
     } finally {
       setIsIngesting(false);
     }
+  };
+
+  const handleSendToHub = async (event: StagingEvent) => {
+    try {
+      const result = await postToCommunityHub(event);
+      const updated = stagingEvents.map(e =>
+        e.id === event.id
+          ? { ...e, communityHubStatus: 'sent' as const, communityHubId: result.id }
+          : e
+      );
+      localStorage.setItem('civicfeed_staging_events', JSON.stringify(updated));
+      setStagingEvents(updated);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Strip any HTML from the error before showing it
+      const clean = msg.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim().slice(0, 200);
+      setLastLog(`CommunityHub error: ${clean}`);
+    }
+  };
+
+  const handleBulkSendToHub = async () => {
+    const toSend = stagingEvents.filter(
+      e => e.review_status === 'approved' && e.communityHubStatus !== 'sent' && e.communityHubStatus !== 'exists'
+    );
+    if (toSend.length === 0) return;
+    setLastLog(`Sending ${toSend.length} approved events to CommunityHub...`);
+    let sent = 0;
+    for (const event of toSend) {
+      try {
+        await handleSendToHub(event);
+        sent++;
+        setLastLog(`Sent ${sent}/${toSend.length} to CommunityHub...`);
+      } catch {
+        // individual errors handled inside handleSendToHub
+      }
+    }
+    setLastLog(`Bulk push complete: ${sent} events sent to CommunityHub.`);
   };
 
   const updateSourceFrequency = (id: string, frequency: number) => {
@@ -349,14 +498,25 @@ export default function App() {
         <div className="p-8 border-b border-gray-50 flex flex-col min-h-[140px] justify-center">
           {!isSidebarCollapsed ? (
             <div className="flex flex-col">
-              <h1 className="text-2xl font-black tracking-tighter text-gray-950 leading-[0.85] uppercase italic">
-                Oberlin<br /><span className="text-crimson">Research</span>
-              </h1>
-              <span className="text-[10px] font-black text-gray-300 uppercase tracking-[0.2em] mt-3 border-t border-gray-50 pt-3">Instrument v2.1</span>
+              {/* Logo mark + wordmark */}
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-9 h-9 rounded-xl bg-crimson flex items-center justify-center shadow-lg shadow-crimson/20">
+                  <Calendar size={18} className="text-white" />
+                </div>
+                <div>
+                  <h1 className="text-[15px] font-black tracking-tight text-gray-950 uppercase leading-none">
+                    Oberlin
+                  </h1>
+                  <p className="text-[11px] font-black text-crimson uppercase tracking-wider leading-none mt-0.5">
+                    Community Calendar
+                  </p>
+                </div>
+              </div>
+              <span className="text-[9px] font-black text-gray-300 uppercase tracking-[0.2em] border-t border-gray-50 pt-3">AI-Powered · Live Data</span>
             </div>
           ) : (
-            <div className="w-12 h-12 bg-gray-950 rounded-2xl flex items-center justify-center text-white font-black text-xl mx-auto shadow-xl shadow-gray-200">
-              O
+            <div className="w-10 h-10 rounded-xl bg-crimson flex items-center justify-center shadow-lg shadow-crimson/20 mx-auto">
+              <Calendar size={18} className="text-white" />
             </div>
           )}
         </div>
@@ -499,7 +659,15 @@ export default function App() {
               className="flex items-center gap-2 px-4 py-2 bg-crimson/5 text-crimson text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-crimson hover:text-white transition-all disabled:opacity-50"
             >
               <RefreshCw size={14} className={isIngesting ? "animate-spin" : ""} />
-              {isIngesting ? "Pulling Data..." : "Initiate First Pull"}
+              {isIngesting ? "Pulling Data..." : "Pull Events"}
+            </button>
+            <button
+              onClick={() => syncToDatabase().then(() => setLastLog('✓ Approved events synced to database'))}
+              disabled={approvedCount === 0}
+              className="flex items-center gap-2 px-4 py-2 bg-emerald-50 text-emerald-700 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-emerald-500 hover:text-white transition-all disabled:opacity-30"
+            >
+              <Database size={14} />
+              Sync DB ({approvedCount})
             </button>
           </div>
 
@@ -539,7 +707,57 @@ export default function App() {
                         {activeTab === 'approved' && "Verified Repository"}
                       </h3>
                     </div>
+                    {/* Bulk send button — only visible on the Approved tab */}
+                    {activeTab === 'approved' && (() => {
+                      const unsent = stagingEvents.filter(
+                        e => e.review_status === 'approved' && e.communityHubStatus !== 'sent' && e.communityHubStatus !== 'exists'
+                      );
+                      return unsent.length > 0 ? (
+                        <button
+                          onClick={handleBulkSendToHub}
+                          className="flex items-center gap-2 px-5 py-3 bg-blue-500 text-white text-[11px] font-black uppercase tracking-widest rounded-2xl hover:bg-blue-600 transition-all shadow-lg"
+                        >
+                          <ExternalLink size={14} />
+                          Push All to CommunityHub ({unsent.length})
+                        </button>
+                      ) : null;
+                    })()}
                   </div>
+
+                  {/* ── Source filter pills ── */}
+                  {(() => {
+                    const activeSources: string[] = Array.from(new Set<string>(stagingEvents.map(e => e.source))).sort();
+                    if (activeSources.length < 2) return null;
+                    return (
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          onClick={() => setSelectedSources(new Set())}
+                          className={cn(
+                            "px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all",
+                            selectedSources.size === 0
+                              ? "bg-gray-900 text-white"
+                              : "bg-gray-100 text-gray-500 hover:bg-gray-200"
+                          )}
+                        >
+                          All
+                        </button>
+                        {activeSources.map(src => (
+                          <button
+                            key={src}
+                            onClick={() => toggleSource(src)}
+                            className={cn(
+                              "px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all border",
+                              selectedSources.has(src)
+                                ? "bg-crimson text-white border-crimson"
+                                : "bg-white text-gray-500 border-gray-100 hover:border-crimson/30 hover:text-crimson"
+                            )}
+                          >
+                            {src}
+                          </button>
+                        ))}
+                      </div>
+                    );
+                  })()}
 
                   <div className="grid grid-cols-1 xl:grid-cols-2 gap-10">
                     {stagingEvents
@@ -548,6 +766,7 @@ export default function App() {
                         if (activeTab === 'approved') return e.review_status === 'approved';
                         return true;
                       })
+                      .filter(e => selectedSources.size === 0 || selectedSources.has(e.source))
                       .length === 0 ? (
                         <div className="col-span-full py-32 flex flex-col items-center justify-center text-center bg-white rounded-[40px] border border-gray-50 italic text-gray-300 font-medium">
                           No matching records found in this partition.
@@ -559,55 +778,156 @@ export default function App() {
                             if (activeTab === 'approved') return e.review_status === 'approved';
                             return true;
                           })
-                          .map(event => (
-                            <div key={event.id} className="bg-white rounded-[40px] border border-gray-50 p-10 hover:shadow-[0_30px_60px_rgba(0,0,0,0.04)] hover:border-crimson/5 transition-all flex flex-col group h-full">
-                               <div className="flex justify-between items-start mb-8">
-                                 <div className="space-y-3">
-                                   <div className="flex items-center gap-3">
-                                     <Badge variant={event.review_status === 'approved' ? 'green' : (event.review_status === 'rejected' ? 'red' : 'gray')}>
-                                       {event.review_status}
-                                     </Badge>
-                                     <span className="text-[11px] font-black text-gray-400 uppercase tracking-[0.1em]">{event.source}</span>
-                                     <div className="h-1 w-1 rounded-full bg-gray-200" />
-                                     <span className="text-[11px] font-black text-crimson uppercase tracking-[0.1em]">→ {event.destination}</span>
-                                   </div>
-                                   <h4 className="text-3xl font-black tracking-tighter text-gray-950 uppercase italic leading-[1.1] group-hover:text-crimson transition-colors line-clamp-2">
-                                     {event.title}
-                                   </h4>
-                                 </div>
-                                 <div className="flex flex-col items-end gap-2">
-                                   <div className="text-[12px] font-black text-crimson bg-crimson/5 px-4 py-2 rounded-2xl border border-crimson/10">
-                                     {event.quality_score}% SCORE
-                                   </div>
-                                 </div>
-                               </div>
-                               <p className="text-[15px] text-gray-500 font-medium line-clamp-3 mb-10 leading-relaxed max-w-[95%]">
-                                 {event.description_long}
-                               </p>
-                               <div className="mt-auto pt-8 flex items-center justify-between border-t border-gray-50">
-                                 <div className="flex items-center gap-8 text-[12px] font-black text-gray-400 uppercase tracking-widest">
-                                   <div className="flex items-center gap-2"><Calendar size={16} /> {event.start_date}</div>
-                                   <div className="flex items-center gap-2"><MapPin size={16} /> {event.geographic_scope}</div>
-                                 </div>
-                                 <div className="flex gap-4">
-                                   {event.review_status === 'approved' && (
-                                      <button 
-                                        onClick={() => handleUndoApprove(event.id)}
-                                        className="text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] hover:text-crimson transition-colors flex items-center gap-2 px-6 py-3 rounded-2xl hover:bg-crimson/5"
-                                      >
-                                        <RotateCcw size={16} /> Undo
-                                      </button>
-                                   )}
-                                   <button 
-                                      onClick={() => setEditingEvent(event)}
-                                      className="text-[12px] font-black text-white bg-gray-950 px-8 py-4 rounded-[20px] uppercase tracking-[0.15em] hover:bg-crimson transition-all shadow-xl shadow-gray-100"
-                                   >
-                                     Audit Record
-                                   </button>
-                                 </div>
-                               </div>
-                            </div>
-                          ))
+                          .filter(e => selectedSources.size === 0 || selectedSources.has(e.source))
+                          .map(event => {
+                            const isPending  = event.review_status === 'ready' || event.review_status === 'needs_review';
+                            const isApproved = event.review_status === 'approved';
+                            const isRejected = event.review_status === 'rejected';
+                            const hubNew     = event.communityHubStatus === 'new';
+                            const hubExists  = event.communityHubStatus === 'exists';
+                            const hubSent    = event.communityHubStatus === 'sent';
+
+                            return (
+                              <div
+                                key={event.id}
+                                className={cn(
+                                  "bg-white rounded-3xl border p-7 flex flex-col gap-5 transition-all duration-200 group",
+                                  "hover:shadow-[0_20px_40px_rgba(0,0,0,0.06)]",
+                                  isApproved ? "border-emerald-100" : isRejected ? "border-rose-100" : "border-gray-100"
+                                )}
+                              >
+                                {/* ── Top row: badges + score ── */}
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="flex flex-wrap items-center gap-2 min-w-0">
+                                    {/* Status */}
+                                    <span className={cn(
+                                      "text-[10px] font-black uppercase tracking-widest px-2.5 py-1 rounded-lg",
+                                      isApproved ? "bg-emerald-50 text-emerald-700" :
+                                      isRejected ? "bg-rose-50 text-rose-600" :
+                                      event.review_status === 'needs_review' ? "bg-amber-50 text-amber-600" :
+                                      "bg-gray-100 text-gray-500"
+                                    )}>
+                                      {isApproved ? "✓ Approved" : isRejected ? "✕ Rejected" : event.review_status === 'needs_review' ? "⚠ Needs Review" : "Ready"}
+                                    </span>
+
+                                    {/* Hub status */}
+                                    {hubExists && (
+                                      <span className="text-[10px] font-black uppercase tracking-widest px-2.5 py-1 rounded-lg bg-blue-50 text-blue-600 border border-blue-100 flex items-center gap-1">
+                                        <Globe size={10}/> On Hub
+                                      </span>
+                                    )}
+                                    {hubNew && (
+                                      <span className="text-[10px] font-black uppercase tracking-widest px-2.5 py-1 rounded-lg bg-violet-50 text-violet-600 border border-violet-100 flex items-center gap-1">
+                                        ✦ New to Hub
+                                      </span>
+                                    )}
+                                    {hubSent && (
+                                      <span className="text-[10px] font-black uppercase tracking-widest px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-600 border border-emerald-100 flex items-center gap-1">
+                                        <Send size={10}/> Sent
+                                      </span>
+                                    )}
+
+                                    {/* Source */}
+                                    <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest truncate">
+                                      {event.source}
+                                    </span>
+                                  </div>
+
+                                  {/* Score pill */}
+                                  <span className={cn(
+                                    "shrink-0 text-[11px] font-black px-3 py-1.5 rounded-xl border",
+                                    event.quality_score >= 90 ? "bg-emerald-50 text-emerald-700 border-emerald-100" :
+                                    event.quality_score >= 70 ? "bg-amber-50 text-amber-700 border-amber-100" :
+                                    "bg-rose-50 text-rose-600 border-rose-100"
+                                  )}>
+                                    {event.quality_score}%
+                                  </span>
+                                </div>
+
+                                {/* ── Title ── */}
+                                <div>
+                                  <h4 className="text-xl font-black tracking-tight text-gray-900 uppercase italic leading-tight group-hover:text-crimson transition-colors line-clamp-2">
+                                    {event.title}
+                                  </h4>
+                                </div>
+
+                                {/* ── Description ── */}
+                                <p className="text-[13px] text-gray-500 leading-relaxed line-clamp-2 flex-1">
+                                  {event.description_long || event.description_short || '—'}
+                                </p>
+
+                                {/* ── Meta row ── */}
+                                <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-[11px] font-bold text-gray-400 uppercase tracking-widest">
+                                  {event.start_date && (
+                                    <span className="flex items-center gap-1.5">
+                                      <Calendar size={12}/> {event.start_date}
+                                    </span>
+                                  )}
+                                  {event.location_name && (
+                                    <span className="flex items-center gap-1.5">
+                                      <MapPin size={12}/> {event.location_name}
+                                    </span>
+                                  )}
+                                  {event.geographic_scope && (
+                                    <span className="flex items-center gap-1.5 text-crimson/60">
+                                      {event.geographic_scope}
+                                    </span>
+                                  )}
+                                </div>
+
+                                {/* ── Action buttons ── */}
+                                <div className="flex flex-wrap items-center gap-2 pt-4 border-t border-gray-50">
+
+                                  {/* Approve — shown when pending or rejected */}
+                                  {(isPending || isRejected) && (
+                                    <button
+                                      onClick={() => handleApprove(event.id)}
+                                      className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-emerald-500 text-white text-[11px] font-black uppercase tracking-widest hover:bg-emerald-600 transition-all active:scale-95"
+                                    >
+                                      <Check size={13}/> Approve
+                                    </button>
+                                  )}
+
+                                  {/* Reject — shown when pending or approved */}
+                                  {(isPending || isApproved) && (
+                                    <button
+                                      onClick={() => isApproved ? handleUndoApprove(event.id) : handleReject(event.id)}
+                                      className={cn(
+                                        "flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-[11px] font-black uppercase tracking-widest transition-all active:scale-95",
+                                        isApproved
+                                          ? "bg-gray-100 text-gray-500 hover:bg-rose-50 hover:text-rose-600"
+                                          : "bg-rose-50 text-rose-600 hover:bg-rose-100"
+                                      )}
+                                    >
+                                      <RotateCcw size={13}/>
+                                      {isApproved ? "Undo" : "Reject"}
+                                    </button>
+                                  )}
+
+                                  {/* Send to Hub — only for approved + not already there */}
+                                  {isApproved && !hubExists && !hubSent && (
+                                    <button
+                                      onClick={() => handleSendToHub(event)}
+                                      className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-violet-500 text-white text-[11px] font-black uppercase tracking-widest hover:bg-violet-600 transition-all active:scale-95"
+                                    >
+                                      <Send size={13}/> Send to Hub
+                                    </button>
+                                  )}
+
+                                  {/* Spacer pushes Edit to the right */}
+                                  <div className="flex-1" />
+
+                                  {/* Edit / Audit */}
+                                  <button
+                                    onClick={() => setEditingEvent(event)}
+                                    className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-gray-900 text-white text-[11px] font-black uppercase tracking-widest hover:bg-crimson transition-all active:scale-95"
+                                  >
+                                    <Pencil size={13}/> Edit
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })
                       )}
                   </div>
                 </motion.div>
@@ -621,16 +941,13 @@ export default function App() {
                   key="analytics"
                   className="space-y-8"
                 >
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                    <MetricCard title="Total Repository" value={stagingEvents.length} icon={Database} />
-                    <MetricCard
-                      title="Precision Audit"
-                      value={`${((approvedCount / (approvedCount + rejectedCount)) * 100 || 0).toFixed(1)}%`}
-                      icon={CheckCircle2}
-                      trend="Real-time"
-                    />
-                    <MetricCard title="Human Approvals" value={approvedCount} icon={CheckCircle2} />
-                    <MetricCard title="Conflict Rate" value={`${((stagingEvents.filter(e => e.quality_score < 70).length / stagingEvents.length) * 100 || 0).toFixed(1)}%`} icon={AlertCircle} />
+                  <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
+                    <MetricCard title="Total Events" value={stagingEvents.length} icon={Database} />
+                    <MetricCard title="Approved" value={approvedCount} icon={CheckCircle2} trend="Real-time" />
+                    <MetricCard title="Pending Review" value={pendingCount} icon={Clock} />
+                    <MetricCard title="Duplicates Found" value={dupStats.exists} icon={AlertCircle} trend={`${dupStats.dupeRate}% dupe rate`} />
+                    <MetricCard title="New to Hub" value={dupStats.isNew} icon={Globe} />
+                    <MetricCard title="Sent to Hub" value={dupStats.sent} icon={Send} />
                   </div>
 
                   <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -639,8 +956,8 @@ export default function App() {
                       <div className="bg-white rounded-[40px] border border-gray-100 shadow-sm p-10">
                         <div className="flex items-center justify-between mb-10">
                           <div>
-                            <h3 className="text-2xl font-black italic tracking-tighter text-gray-900 uppercase">Extraction Frequency</h3>
-                            <p className="text-[10px] text-gray-400 font-extrabold uppercase tracking-widest mt-1">Staging density grouped by primary research providers</p>
+                            <h3 className="text-2xl font-black italic tracking-tighter text-gray-900 uppercase">Events by Source</h3>
+                            <p className="text-[10px] text-gray-400 font-extrabold uppercase tracking-widest mt-1">Live count of ingested events per data source</p>
                           </div>
                           <div className="flex flex-wrap gap-4 justify-end">
                             {Object.entries(SOURCE_COLORS).map(([name, color]) => (
@@ -741,6 +1058,56 @@ export default function App() {
                     </div>
 
                     <div className="space-y-8">
+
+                      {/* Duplicate detection breakdown */}
+                      <div className="bg-white rounded-3xl border border-gray-100 p-7 space-y-5">
+                        <div>
+                          <h3 className="text-sm font-black uppercase tracking-widest text-gray-900">Hub Duplicate Detection</h3>
+                          <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mt-0.5">AI embedding comparison against CommunityHub</p>
+                        </div>
+
+                        {dupStats.checked === 0 ? (
+                          <p className="text-xs text-gray-400 italic">Pull events to run duplicate detection.</p>
+                        ) : (
+                          <>
+                            {/* Visual bar */}
+                            <div className="w-full h-3 rounded-full bg-gray-100 overflow-hidden flex">
+                              <div
+                                className="h-full bg-blue-400 transition-all"
+                                style={{ width: `${(dupStats.exists / dupStats.checked) * 100}%` }}
+                              />
+                              <div
+                                className="h-full bg-violet-400 transition-all"
+                                style={{ width: `${(dupStats.isNew / dupStats.checked) * 100}%` }}
+                              />
+                              <div
+                                className="h-full bg-emerald-400 transition-all"
+                                style={{ width: `${(dupStats.sent / dupStats.checked) * 100}%` }}
+                              />
+                            </div>
+
+                            <div className="grid grid-cols-3 gap-3 text-center">
+                              <div className="bg-blue-50 border border-blue-100 rounded-2xl p-4">
+                                <div className="text-2xl font-black text-blue-600">{dupStats.exists}</div>
+                                <div className="text-[9px] font-black uppercase tracking-widest text-blue-400 mt-1">Already on Hub</div>
+                              </div>
+                              <div className="bg-violet-50 border border-violet-100 rounded-2xl p-4">
+                                <div className="text-2xl font-black text-violet-600">{dupStats.isNew}</div>
+                                <div className="text-[9px] font-black uppercase tracking-widest text-violet-400 mt-1">New to Hub</div>
+                              </div>
+                              <div className="bg-emerald-50 border border-emerald-100 rounded-2xl p-4">
+                                <div className="text-2xl font-black text-emerald-600">{dupStats.sent}</div>
+                                <div className="text-[9px] font-black uppercase tracking-widest text-emerald-400 mt-1">Sent to Hub</div>
+                              </div>
+                            </div>
+
+                            <div className="text-center text-[10px] text-gray-400 font-bold uppercase tracking-widest">
+                              {dupStats.dupeRate}% duplicate rate across {dupStats.checked} checked events
+                            </div>
+                          </>
+                        )}
+                      </div>
+
                       <div className="grid grid-cols-1 gap-6">
                         <AIPulse events={stagingEvents} />
                       </div>
@@ -820,6 +1187,57 @@ export default function App() {
                   <div className="p-10 border-b border-gray-50 bg-white">
                     <h3 className="text-3xl font-black italic tracking-tighter text-gray-900 uppercase">Provider Infrastructure</h3>
                     <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mt-1">Configuring extraction adapters and system synchronization parameters</p>
+                  </div>
+
+                  {/* Auto-approve settings */}
+                  <div className="p-10 border-b border-gray-100 bg-white">
+                    <div className="flex items-center justify-between mb-6">
+                      <div>
+                        <h4 className="text-sm font-black uppercase tracking-widest text-gray-900">Auto-Approve</h4>
+                        <p className="text-xs text-gray-400 font-medium mt-1">
+                          Events with a quality score at or above the threshold are automatically approved on ingest
+                        </p>
+                      </div>
+                      {/* Toggle */}
+                      <button
+                        onClick={toggleAutoApprove}
+                        className={cn(
+                          "relative w-12 h-6 rounded-full transition-colors shrink-0",
+                          autoApprove ? "bg-emerald-500" : "bg-gray-200"
+                        )}
+                      >
+                        <span className={cn(
+                          "absolute top-1 w-4 h-4 bg-white rounded-full shadow transition-transform",
+                          autoApprove ? "translate-x-7" : "translate-x-1"
+                        )} />
+                      </button>
+                    </div>
+
+                    {autoApprove && (
+                      <div className="space-y-4">
+                        <div className="flex items-center gap-6 bg-emerald-50 border border-emerald-100 rounded-2xl p-5">
+                          <span className="text-xs font-black uppercase tracking-widest text-emerald-700 shrink-0">
+                            Threshold
+                          </span>
+                          <input
+                            type="range"
+                            min={50} max={100} step={5}
+                            value={autoApproveThreshold}
+                            onChange={e => changeThreshold(Number(e.target.value))}
+                            className="flex-1 accent-emerald-500"
+                          />
+                          <span className="text-xl font-black text-emerald-700 w-16 text-right">
+                            {autoApproveThreshold}%
+                          </span>
+                        </div>
+                        <button
+                          onClick={applyAutoApproveNow}
+                          className="w-full py-3 bg-emerald-500 hover:bg-emerald-600 text-white text-[11px] font-black uppercase tracking-widest rounded-2xl transition-all flex items-center justify-center gap-2"
+                        >
+                          <Check size={14} /> Apply to Existing Events Now
+                        </button>
+                      </div>
+                    )}
                   </div>
                   
                   <div className="p-10 bg-gray-50/30 border-b border-gray-100">

@@ -1,10 +1,9 @@
-# Split stack (recommended on Render free tier):
-# - Static site: SPA from CDN (no cold start for the UI).
-# - Web service: research API only (can spin down when idle).
+# Backend API service on Render (free tier).
+# Frontend is deployed separately on Vercel.
 #
-# After first deploy, set OPENAI_API_KEY on the static site (Vite bakes it at build time).
-# Set API_ACCESS_TOKEN on the API service. URLs assume these service names; if Render
-# assigns a different slug, update CORS_ORIGINS and VITE_API_BASE_URL to match.
+# After first deploy:
+#   1. Set API_ACCESS_TOKEN on this service.
+#   2. Update CORS_ORIGINS to your Vercel frontend URL (e.g. https://your-app.vercel.app).
 services:
   - type: web
     name: oberlin-community-calendar-api
@@ -20,19 +19,6 @@ services:
       - key: NODE_ENV
         value: production
       - key: CORS_ORIGINS
-        value: https://oberlin-community-calendar-web.onrender.com
+        value: https://oberlin-community-calendar-ai.vercel.app
       - key: API_ACCESS_TOKEN
-        sync: false
-
-  - type: web
-    name: oberlin-community-calendar-web
-    repo: https://github.com/2024frank/Oberlin-Community-Calendar-AI
-    runtime: static
-    branch: main
-    buildCommand: npm install && npm run build
-    staticPublishPath: ./dist
-    envVars:
-      - key: VITE_API_BASE_URL
-        value: https://oberlin-community-calendar-api.onrender.com
-      - key: OPENAI_API_KEY
         sync: false

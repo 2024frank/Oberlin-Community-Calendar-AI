@@ -46,6 +46,9 @@ export interface NormalizedEvent {
   fetched_at: string;
   ai_geographic_scope: GeographicScope;
   raw_payload: any;
+  // CommunityHub enrichment
+  communityHubStatus?: 'exists' | 'new' | 'unknown' | 'sent';
+  communityHubId?: number | null;
 }
 
 export interface StagingEvent extends NormalizedEvent {
@@ -56,6 +59,7 @@ export interface Source {
   id: string;
   name: string;
   url: string;
+  eventsUrl?: string;   // direct URL to events/calendar page for scraping
   adapter: string;
   apiBase?: string;
   category: string;
