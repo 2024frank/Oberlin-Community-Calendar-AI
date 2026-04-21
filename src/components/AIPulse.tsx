@@ -15,7 +15,7 @@ export const AIPulse: React.FC<AIPulseProps> = ({ events }) => {
 
   const generateInsight = async () => {
     if (events.length === 0) {
-      setInsight("Data lake is currently empty. Start extracting community events to see the AI pulse.");
+      setInsight("Event feed is currently empty. Start extracting community events to see the AI pulse.");
       return;
     }
 

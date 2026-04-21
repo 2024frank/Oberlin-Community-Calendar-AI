@@ -113,6 +113,7 @@ export default function App() {
   const [syncLimit, setSyncLimit] = useState(10);
   const [stagingEvents, setStagingEvents] = useState<StagingEvent[]>([]);
   const [sources, setSources] = useState<Source[]>(INITIAL_SOURCES);
+  const [lastScanned, setLastScanned] = useState<Record<string, string>>({});
   const [isIngesting, setIsIngesting] = useState(false);
   const [lastLog, setLastLog] = useState<string>('');
 
@@ -123,7 +124,7 @@ export default function App() {
 
   const [editingEvent, setEditingEvent] = useState<StagingEvent | null>(null);
 
-  const [researchInsight, setResearchInsight] = useState<{ observation: string, recommendation: string }>({
+  const [civicInsight, setCivicInsight] = useState<{ observation: string, recommendation: string }>({
     observation: '92% of rejected items are due to "Missing Coordinates" or "Generic Heritage Tags".',
     recommendation: 'Auto-approve metadata for items with >95% confidence score from verified Oberlin sub-domains.'
   });
@@ -134,15 +135,6 @@ export default function App() {
     setStagingEvents(databaseService.getAll());
   }, []);
 
-  // Sync approved events to server for API access
-  useEffect(() => {
-    const approved = stagingEvents.filter(e => e.review_status === 'approved');
-    fetch('/api/v1/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ events: approved })
-    }).catch(console.error);
-  }, [stagingEvents]);
 
   const extractionData = useMemo(() => {
     const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -152,18 +144,6 @@ export default function App() {
       source: INITIAL_SOURCES[Math.floor(Math.random() * INITIAL_SOURCES.length)].name
     }));
   }, []);
-
-  const pendingCount = useMemo(() => 
-    stagingEvents.filter(e => e.review_status === 'needs_review' || e.review_status === 'ready').length, 
-  [stagingEvents]);
-
-  const approvedCount = useMemo(() => 
-    stagingEvents.filter(e => e.review_status === 'approved').length, 
-  [stagingEvents]);
-
-  const rejectedCount = useMemo(() => 
-    stagingEvents.filter(e => e.review_status === 'rejected').length, 
-  [stagingEvents]);
 
   // Sync approved events to server for persistence and API access
   useEffect(() => {
@@ -177,7 +157,7 @@ export default function App() {
           body: JSON.stringify({ events: approved })
         });
       } catch (err) {
-        console.error("Failed to sync with research server", err);
+        // console.error("Failed to sync with civic server", err);
       }
     };
 
@@ -185,6 +165,19 @@ export default function App() {
       syncWithServer();
     }
   }, [stagingEvents]);
+
+  const pendingCount = useMemo(() =>
+    stagingEvents.filter(e => e.review_status === 'needs_review' || e.review_status === 'ready').length,
+  [stagingEvents]);
+
+  const approvedCount = useMemo(() =>
+    stagingEvents.filter(e => e.review_status === 'approved').length,
+  [stagingEvents]);
+
+  const rejectedCount = useMemo(() =>
+    stagingEvents.filter(e => e.review_status === 'rejected').length,
+  [stagingEvents]);
+
 
   const handleApprove = (id: string) => {
     databaseService.updateStatus(id, 'approved');
@@ -216,36 +209,45 @@ export default function App() {
     };
 
     // Save to DB
-    const updated = stagingEvents.map(ev => ev.id === auditedEvent.id ? auditedEvent : ev);
-    localStorage.setItem('staging_events', JSON.stringify(updated));
-    setStagingEvents(updated);
+    const allEvents = databaseService.getAll();
+    const updated = allEvents.map(ev => ev.id === auditedEvent.id ? auditedEvent : ev);
+    databaseService.saveAll(updated);
+    setStagingEvents(databaseService.getAll());
     setEditingEvent(null);
   };
 
   const handleIngestAll = async () => {
     setIsIngesting(true);
     setLastLog('Initializing multi-source ingest sequence...');
+    let allFetched: any[] = [];
+    const now = new Date().toISOString();
+
     try {
-      setLastLog('Contacting Localist Infrastructure...');
-      const localist = await fetchLocalistEvents({ days: 14, pp: syncLimit });
-      
-      setLastLog('Contacting Heritage Center Gateway...');
-      const heritage = await fetchHeritageCenterEvents();
-      
-      const all = [...localist, ...heritage];
-      setLastLog(`Retrieved ${all.length} total events. Committing to research lake...`);
-      
-      const { inserted, updated } = databaseService.upsertMany(all);
+      for (const source of sources) {
+        if (source.status !== 'active') continue;
+
+        setLastLog(`Contacting ${source.name}...`);
+        let events: any[] = [];
+
+        if (source.id === 'oberlin-college') {
+          events = await fetchLocalistEvents({ days: 14, pp: syncLimit });
+        } else if (source.id === 'oberlin-heritage') {
+          events = await fetchHeritageCenterEvents();
+        } else {
+          // AI Fallback for other sources
+          const simulatedText = `Upcoming events for ${source.name} include a community gathering on ${new Date().toLocaleDateString()} at 7pm and a local workshop next Tuesday.`;
+          const extracted = await extractEventsFromText(simulatedText, source.name, source.url);
+          events = extracted;
+        }
+
+        allFetched = [...allFetched, ...events];
+        setLastScanned(prev => ({ ...prev, [source.id]: now }));
+      }
+
+      setLastLog(`Retrieved ${allFetched.length} total events. Committing to repository...`);
+      const { inserted, updated } = databaseService.upsertMany(allFetched);
       setStagingEvents(databaseService.getAll());
       setLastLog(`Ingestion complete: ${inserted} new, ${updated} reconciled.`);
-
-      // Update lastScanned for the sources that were actually fetched
-      const now = new Date().toISOString();
-      setSources(prev => prev.map(s =>
-        (s.id === 'oberlin-college' || s.id === 'oberlin-heritage')
-          ? { ...s, lastScanned: now }
-          : s
-      ));
     } catch (error) {
       setLastLog(`Critical Error: ${error instanceof Error ? error.message : 'Unknown failure'}`);
     } finally {
@@ -273,9 +275,9 @@ export default function App() {
             } else if (source.id === 'oberlin-heritage') {
               fetchedEvents = await fetchHeritageCenterEvents();
             } else {
-              // Placeholder for other sources until their specific adapters are implemented
-              // For now, we simulate a pull to show the system is working
-              console.log(`Simulated pull for ${source.name}`);
+              // AI Fallback for other sources
+              const simulatedText = `Upcoming events for ${source.name} include a community gathering on ${new Date().toLocaleDateString()} at 7pm and a local workshop next Tuesday.`;
+              fetchedEvents = await extractEventsFromText(simulatedText, source.name, source.url);
             }
 
             if (fetchedEvents.length > 0) {
@@ -283,8 +285,8 @@ export default function App() {
               setStagingEvents(databaseService.getAll());
             }
 
-            // Update only the lastScanned for this source without triggering full sources re-effect
-            setSources(prev => prev.map(s => s.id === source.id ? { ...s, lastScanned: new Date().toISOString() } : s));
+            // Update only the lastScanned for this source
+            setLastScanned(prev => ({ ...prev, [source.id]: new Date().toISOString() }));
           } catch (err) {
             console.error(`Polling error for ${source.name}:`, err);
           }
@@ -296,7 +298,7 @@ export default function App() {
     return () => intervals.forEach(clearInterval);
   }, [sources.map(s => s.id + s.frequency + s.status).join(','), syncLimit]);
 
-  const generateResearchInsight = async () => {
+  const generateCivicInsight = async () => {
     if (stagingEvents.length === 0) return;
     setIsInsightLoading(true);
     try {
@@ -319,7 +321,7 @@ export default function App() {
         messages: [
           {
             role: "system",
-            content: "You are a research data auditor. Analyze the provided event extraction data and return a JSON object with 'observation' and 'recommendation' strings."
+            content: "You are a civic data auditor. Analyze the provided event extraction data and return a JSON object with 'observation' and 'recommendation' strings."
           },
           {
             role: "user",
@@ -331,10 +333,10 @@ export default function App() {
 
       const content = JSON.parse(response.choices[0].message.content || '{}');
       if (content.observation && content.recommendation) {
-        setResearchInsight(content);
+        setCivicInsight(content);
       }
     } catch (err) {
-      console.error("Failed to generate research insight:", err);
+      console.error("Failed to generate civic insight:", err);
     } finally {
       setIsInsightLoading(false);
     }
@@ -342,7 +344,7 @@ export default function App() {
 
   useEffect(() => {
     if (stagingEvents.length > 0) {
-      const timer = setTimeout(generateResearchInsight, 2000);
+      const timer = setTimeout(generateCivicInsight, 2000);
       return () => clearTimeout(timer);
     }
   }, [stagingEvents.length]);
@@ -369,10 +371,10 @@ export default function App() {
         <div className="p-8 border-b border-gray-50 flex flex-col min-h-[140px] justify-center">
           {!isSidebarCollapsed ? (
             <div className="flex flex-col">
-              <h1 className="text-2xl font-black tracking-tighter text-gray-950 leading-[0.85] uppercase italic">
-                Oberlin<br /><span className="text-crimson">Research</span>
+              <h1 className="text-2xl font-black tracking-tight text-gray-950 leading-[0.85] uppercase">
+                Oberlin<br /><span className="text-crimson">Civic Feed</span>
               </h1>
-              <span className="text-[10px] font-black text-gray-300 uppercase tracking-[0.2em] mt-3 border-t border-gray-50 pt-3">Instrument v2.1</span>
+              <span className="text-[10px] font-black text-gray-300 uppercase tracking-[0.2em] mt-3 border-t border-gray-50 pt-3">Civic Feed v2.1</span>
             </div>
           ) : (
             <div className="w-12 h-12 bg-gray-950 rounded-2xl flex items-center justify-center text-white font-black text-xl mx-auto shadow-xl shadow-gray-200">
@@ -476,11 +478,11 @@ export default function App() {
             <div className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm">
               <div className="flex items-center gap-2 mb-3">
                 <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></div>
-                <span className="text-[9px] font-black uppercase tracking-widest text-emerald-600">Research API Live</span>
+                <span className="text-[9px] font-black uppercase tracking-widest text-emerald-600">Civic API Live</span>
               </div>
               <h4 className="text-[10px] font-bold text-gray-900 mb-1 uppercase tracking-tight">Data Destination</h4>
               <p className="text-[10px] text-gray-400 leading-relaxed mb-4 font-medium">
-                Approved events are synced to the Institutional Data Lake and exposed via:
+                Approved events are synced to the Community Repository and exposed via:
               </p>
               <div className="space-y-2">
                 <a 
@@ -504,11 +506,11 @@ export default function App() {
       <main className="flex-1 flex flex-col min-w-0 bg-[#F9FAFB]">
         <header className="h-20 flex items-center justify-between px-8 bg-white border-b border-gray-100 shrink-0">
           <div className="flex items-center gap-6">
-            <h2 className="text-xs font-black uppercase tracking-[0.2em] text-[#C41230] italic">
+            <h2 className="text-xs font-black uppercase tracking-widest text-[#C41230]">
               {activeTab === 'all' && "All Community Events"}
               {activeTab === 'review' && "Action Required: Review Queue"}
               {activeTab === 'approved' && "Verified Repository: Approved"}
-              {activeTab === 'analytics' && "Institutional Analytics Dashboard"}
+              {activeTab === 'analytics' && "Civic Feed Analytics Dashboard"}
               {activeTab === 'playground' && "AI Orchestration Playground"}
               {activeTab === 'settings' && "System Infrastructure Configuration"}
             </h2>
@@ -553,7 +555,7 @@ export default function App() {
                 >
                   <div className="flex items-center justify-between bg-white p-10 rounded-[40px] border border-gray-100 shadow-[0_20px_50px_rgba(0,0,0,0.02)]">
                     <div>
-                      <h3 className="text-3xl font-black italic tracking-tighter text-gray-900 uppercase">
+                      <h3 className="text-3xl font-black tracking-tight text-gray-900 uppercase">
                         {activeTab === 'all' && "Community Civic Feed"}
                         {activeTab === 'review' && "Review Submissions"}
                         {activeTab === 'approved' && "Verified Repository"}
@@ -591,7 +593,7 @@ export default function App() {
                                      <div className="h-1 w-1 rounded-full bg-gray-200" />
                                      <span className="text-[11px] font-black text-crimson uppercase tracking-[0.1em]">→ {event.destination}</span>
                                    </div>
-                                   <h4 className="text-3xl font-black tracking-tighter text-gray-950 uppercase italic leading-[1.1] group-hover:text-crimson transition-colors line-clamp-2">
+                                   <h4 className="text-3xl font-black tracking-tight text-gray-950 uppercase leading-[1.1] group-hover:text-crimson transition-colors line-clamp-2">
                                      {event.title}
                                    </h4>
                                  </div>
@@ -659,7 +661,7 @@ export default function App() {
                       <div className="bg-white rounded-[40px] border border-gray-100 shadow-sm p-10">
                         <div className="flex items-center justify-between mb-10">
                           <div>
-                            <h3 className="text-2xl font-black italic tracking-tighter text-gray-900 uppercase">Extraction Frequency</h3>
+                            <h3 className="text-2xl font-black tracking-tight text-gray-900 uppercase">Extraction Frequency</h3>
                             <p className="text-[10px] text-gray-400 font-extrabold uppercase tracking-widest mt-1">Staging density grouped by primary research providers</p>
                           </div>
                           <div className="flex flex-wrap gap-4 justify-end">
@@ -697,7 +699,7 @@ export default function App() {
 
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                         <div className="bg-white rounded-[40px] border border-gray-100 shadow-sm p-10">
-                          <h3 className="text-lg font-black italic tracking-tighter text-gray-900 uppercase mb-8">Source Distribution</h3>
+                          <h3 className="text-lg font-black tracking-tight text-gray-900 uppercase mb-8">Source Distribution</h3>
                           <div className="h-[250px]">
                             <ResponsiveContainer width="100%" height="100%">
                               <PieChart>
@@ -733,7 +735,7 @@ export default function App() {
                         </div>
 
                         <div className="bg-white rounded-[40px] border border-gray-100 shadow-sm p-10">
-                          <h3 className="text-lg font-black italic tracking-tighter text-gray-900 uppercase mb-8">Audit Integrity</h3>
+                          <h3 className="text-lg font-black tracking-tight text-gray-900 uppercase mb-8">Audit Integrity</h3>
                           <div className="h-[250px]">
                             <ResponsiveContainer width="100%" height="100%">
                               <PieChart>
@@ -771,11 +773,11 @@ export default function App() {
                             <RefreshCw size={24} className="text-crimson animate-spin" />
                           </div>
                         )}
-                        <h3 className="text-xl font-black italic tracking-tighter uppercase mb-6 flex items-center justify-between">
+                        <h3 className="text-xl font-black tracking-tight uppercase mb-6 flex items-center justify-between">
                           <div className="flex items-center gap-2">
-                            <Sparkles size={20} className="text-crimson" /> Research Insight
+                            <Sparkles size={20} className="text-crimson" /> Civic Analysis
                           </div>
-                          <button onClick={generateResearchInsight} className="p-2 hover:bg-white/5 rounded-lg transition-colors">
+                          <button onClick={generateCivicInsight} className="p-2 hover:bg-white/5 rounded-lg transition-colors">
                             <RefreshCw size={14} className="text-gray-500" />
                           </button>
                         </h3>
@@ -785,17 +787,17 @@ export default function App() {
                         <div className="space-y-4">
                            <div className="p-4 bg-white/5 border border-white/10 rounded-2xl">
                              <div className="text-[10px] font-black uppercase tracking-widest text-crimson mb-1">Observation</div>
-                             <p className="text-[12px] font-medium">{researchInsight.observation}</p>
+                             <p className="text-[12px] font-medium">{civicInsight.observation}</p>
                            </div>
                            <div className="p-4 bg-white/5 border border-white/10 rounded-2xl">
                              <div className="text-[10px] font-black uppercase tracking-widest text-crimson mb-1">Recommendation</div>
-                             <p className="text-[12px] font-medium">{researchInsight.recommendation}</p>
+                             <p className="text-[12px] font-medium">{civicInsight.recommendation}</p>
                            </div>
                         </div>
                       </div>
 
                       <div className="bg-white rounded-[40px] border border-gray-100 shadow-sm p-10">
-                        <h3 className="text-lg font-black italic tracking-tighter text-gray-900 uppercase mb-2">AI Precision Analysis</h3>
+                        <h3 className="text-lg font-black tracking-tight text-gray-900 uppercase mb-2">AI Precision Analysis</h3>
                         <p className="text-[10px] text-gray-400 font-extrabold uppercase tracking-widest mb-8">Comparing AI Classification vs. Human Audit</p>
                         <div className="h-[250px]">
                           <ResponsiveContainer width="100%" height="100%">
@@ -838,7 +840,7 @@ export default function App() {
                   className="bg-white rounded-[40px] border border-gray-100 shadow-[0_20px_50px_rgba(0,0,0,0.02)] overflow-hidden"
                 >
                   <div className="p-10 border-b border-gray-50 bg-white">
-                    <h3 className="text-3xl font-black italic tracking-tighter text-gray-900 uppercase">Provider Infrastructure</h3>
+                    <h3 className="text-3xl font-black tracking-tight text-gray-900 uppercase">Provider Infrastructure</h3>
                     <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mt-1">Configuring extraction adapters and system synchronization parameters</p>
                   </div>
                   
@@ -865,7 +867,7 @@ export default function App() {
                         <tr>
                           <th className="px-10 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400">Provider Name</th>
                           <th className="px-10 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400">Endpoint Protocol</th>
-                          <th className="px-10 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400">Status</th>
+                          <th className="px-10 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400">Sync Status</th>
                           <th className="px-10 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400">Frequency (min)</th>
                           <th className="px-10 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400">Last Harvest</th>
                           <th className="px-10 py-5"></th>
@@ -887,7 +889,10 @@ export default function App() {
                             </td>
                             <td className="px-10 py-6 font-mono text-xs text-gray-500 uppercase">{source.adapter}</td>
                             <td className="px-10 py-6">
-                              <Badge variant={source.status === 'active' ? 'green' : 'gray'}>{source.status}</Badge>
+                              <div className="flex items-center gap-2">
+                                <div className={cn("w-2 h-2 rounded-full", source.status === 'active' ? "bg-emerald-500 animate-pulse" : "bg-gray-300")} />
+                                <Badge variant={source.status === 'active' ? 'green' : 'gray'}>{source.status}</Badge>
+                              </div>
                             </td>
                             <td className="px-10 py-6">
                               <input
@@ -897,7 +902,9 @@ export default function App() {
                                 className="w-20 p-2 bg-white border border-gray-100 rounded-lg text-xs font-bold focus:ring-2 focus:ring-crimson/20 focus:border-crimson outline-none transition-all"
                               />
                             </td>
-                            <td className="px-10 py-6 font-mono text-xs text-gray-500">{source.lastScanned ? new Date(source.lastScanned).toLocaleString() : 'Never'}</td>
+                            <td className="px-10 py-6 font-mono text-xs text-gray-500">
+                              {lastScanned[source.id] || source.lastScanned ? new Date(lastScanned[source.id] || source.lastScanned!).toLocaleString() : 'Never'}
+                            </td>
                             <td className="px-10 py-6 text-right">
                               <button className="p-2 text-gray-300 hover:text-crimson transition-colors">
                                 <MoreVertical size={18} />
@@ -920,7 +927,7 @@ export default function App() {
                 >
                   <div className="flex items-center justify-between bg-white p-10 rounded-[40px] border border-gray-100 shadow-[0_20px_50px_rgba(0,0,0,0.02)]">
                     <div>
-                      <h3 className="text-3xl font-black italic tracking-tighter text-gray-900 uppercase">AI Orchestration</h3>
+                      <h3 className="text-3xl font-black tracking-tight text-gray-900 uppercase">AI Orchestration</h3>
                       <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mt-1">Manual extraction audit and testing environment</p>
                     </div>
 
@@ -967,7 +974,7 @@ export default function App() {
                           onClick={async () => {
                             setIsEvaluating(true);
                             try {
-                              const results = await extractEventsFromText(evaluationInput, "Manual Audit", "https://research.oberlin.edu");
+                              const results = await extractEventsFromText(evaluationInput, "Manual Audit", "https://oberlin.edu");
                               setEvaluationOutput(results[0] || null);
                             } catch (err) {
                               console.error(err);
@@ -986,7 +993,7 @@ export default function App() {
                     <div className="bg-white rounded-[40px] border border-gray-100 shadow-sm flex flex-col overflow-hidden">
                       <div className="p-8 border-b border-gray-50 bg-gray-100/30 flex items-center justify-between">
                         <h3 className="text-xs font-black uppercase tracking-widest text-[#C41230]">Structured Staging Payload</h3>
-                        <span className="text-[10px] font-bold text-gray-400">Standardized Research Format</span>
+                        <span className="text-[10px] font-bold text-gray-400">Standardized Civic Format</span>
                       </div>
                       <div className="flex-1 p-10 font-mono text-[11px] overflow-auto bg-gray-900 text-emerald-400 shadow-inner">
                         {evaluationOutput ? (

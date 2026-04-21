@@ -73,5 +73,12 @@ export const databaseService = {
     const events = this.getAll();
     const updated = events.map(e => e.id === id ? { ...e, review_status: status as any } : e);
     localStorage.setItem(DB_KEY, JSON.stringify(updated));
+  },
+
+  /**
+   * Save all events to the staging database
+   */
+  saveAll(events: StagingEvent[]): void {
+    localStorage.setItem(DB_KEY, JSON.stringify(events));
   }
 };
