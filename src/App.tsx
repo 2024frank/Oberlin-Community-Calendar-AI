@@ -427,6 +427,55 @@ export default function App() {
     setLastLog(`✓ Done: ${sent} sent to CommunityHub & cleared from DB${failMsg}`);
   };
 
+  /** Load approved events from Redis into the local staging DB + UI */
+  const handleLoadFromDb = async () => {
+    setLastLog('Loading events from database...');
+    try {
+      const res = await fetch('/api/v1/db-events');
+      if (!res.ok) throw new Error(`DB fetch failed: ${res.status}`);
+      const { data, count } = await res.json();
+      if (!count || count === 0) {
+        setLastLog('Database is empty — no events to load.');
+        return;
+      }
+      // Upsert into local staging
+      databaseService.upsertMany(data);
+      const all = databaseService.getAll();
+      setStagingEvents(all);
+      setLastLog(`✓ Loaded ${count} events from database into staging`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setLastLog(`Load from DB error: ${msg}`);
+    }
+  };
+
+  /** Push all approved events from Redis → CommunityHub server-side, clear from DB */
+  const handleServerPushToHub = async () => {
+    if (bulkSendingRef.current) return;
+    bulkSendingRef.current = true;
+    setIsBulkSending(true);
+    setLastLog('Server: pushing approved events from DB to CommunityHub...');
+    try {
+      const res = await fetch('/api/v1/push-to-hub', { method: 'POST' });
+      if (!res.ok) throw new Error(`Push failed: ${res.status}`);
+      const result = await res.json();
+      // Refresh local view from DB
+      const dbRes = await fetch('/api/v1/db-events');
+      const { data } = await dbRes.json();
+      databaseService.upsertMany(data || []);
+      setStagingEvents(databaseService.getAll());
+      const failNote = result.failed > 0 ? ` · ${result.failed} failed` : '';
+      setLastLog(`✓ Server push done: ${result.sent} sent to CommunityHub${failNote}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setLastLog(`Server push error: ${msg}`);
+    } finally {
+      bulkSendingRef.current = false;
+      setIsBulkSending(false);
+      setHubPushProgress(null);
+    }
+  };
+
   const updateSourceFrequency = (id: string, frequency: number) => {
     setSources(prev => prev.map(s => s.id === id ? { ...s, frequency } : s));
   };
@@ -753,6 +802,23 @@ export default function App() {
             >
               <Database size={14} />
               Sync DB ({approvedCount})
+            </button>
+            <button
+              onClick={handleLoadFromDb}
+              className="flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-blue-500 hover:text-white transition-all"
+            >
+              <Database size={14} />
+              Load from DB
+            </button>
+            <button
+              onClick={handleServerPushToHub}
+              disabled={isBulkSending}
+              className="flex items-center gap-2 px-4 py-2 bg-violet-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-violet-600 transition-all disabled:opacity-60"
+            >
+              {isBulkSending
+                ? <><svg className="animate-spin" width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3}><circle cx="12" cy="12" r="10" strokeOpacity="0.3"/><path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round"/></svg> Pushing...</>
+                : <><ExternalLink size={14}/> Push DB → Hub</>
+              }
             </button>
           </div>
 
