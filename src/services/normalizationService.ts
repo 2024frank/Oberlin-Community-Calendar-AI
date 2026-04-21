@@ -51,9 +51,28 @@ export function calculateQualityScore(event: Partial<NormalizedEvent>): {
   };
 }
 
+const HTML_ENTITIES: Record<string, string> = {
+  '&nbsp;':   ' ',  '&amp;':  '&',  '&lt;':    '<',  '&gt;':    '>',
+  '&quot;':  '"',  '&apos;': "'",  '&ndash;':  '–',  '&mdash;': '—',
+  '&ldquo;': '"',  '&rdquo;': '"', '&lsquo;': '\u2018', '&rsquo;': '\u2019',
+  '&hellip;': '…', '&bull;':  '•', '&copy;':   '©',  '&reg;':   '®',
+  '&trade;': '™',  '&deg;':   '°', '&frac12;': '½',  '&frac14;': '¼',
+  '&times;': '×',  '&divide;':'÷',
+};
+
 export function stripHtml(html: string): string {
   if (!html) return "";
-  return html.replace(/<[^>]*>?/gm, "").trim();
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<[^>]*>?/gm, ' ')
+    // Named entities
+    .replace(/&[a-z]+;/gi, m => HTML_ENTITIES[m.toLowerCase()] ?? ' ')
+    // Numeric entities (e.g. &#8211; &#x2014;)
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#([0-9]+);/gi,     (_, d) => String.fromCodePoint(Number(d)))
+    .replace(/\s{2,}/g, ' ')
+    .trim();
 }
 
 export function normalizeLocalistEvent(raw: any): NormalizedEvent {

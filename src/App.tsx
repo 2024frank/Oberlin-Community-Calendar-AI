@@ -475,6 +475,31 @@ export default function App() {
     }
   };
 
+  /** Wipe everything: localStorage staging + Redis + pushed-IDs cache — fresh start */
+  const handleClearAll = async () => {
+    if (!window.confirm('Clear ALL events from staging and the database? This cannot be undone.')) return;
+    // Clear localStorage
+    localStorage.removeItem('civicfeed_staging_events');
+    localStorage.removeItem('hub_pushed_ids');
+    // Clear Redis
+    await fetch('/api/v1/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ events: [] }),
+    }).catch(() => {});
+    // Reset in-memory refs
+    pushedIdsRef.current.clear();
+    sendingIdsRef.current.clear();
+    bulkSendingRef.current = false;
+    // Reset UI state
+    setStagingEvents([]);
+    setPushResult(null);
+    setHubPushProgress(null);
+    setIsBulkSending(false);
+    setSendingToHub(new Set());
+    setLastLog('✓ All events cleared. Ready for a fresh pull.');
+  };
+
   /** Push all approved events from Redis → CommunityHub server-side, clear from DB */
   const handleServerPushToHub = async () => {
     if (bulkSendingRef.current) return;
@@ -873,6 +898,14 @@ export default function App() {
                 ? <><svg className="animate-spin" width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3}><circle cx="12" cy="12" r="10" strokeOpacity="0.3"/><path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round"/></svg> Pushing...</>
                 : <><ExternalLink size={14}/> Push DB → Hub</>
               }
+            </button>
+            <button
+              onClick={handleClearAll}
+              className="flex items-center gap-2 px-4 py-2 bg-rose-50 text-rose-600 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-rose-500 hover:text-white transition-all"
+              title="Clear all events from staging and database"
+            >
+              <RotateCcw size={14} />
+              Clear All
             </button>
           </div>
 
