@@ -21,7 +21,7 @@ const EMBED_MODEL   = 'text-embedding-3-small';
 const DUPE_THRESHOLD = 0.82;   // tune: higher = stricter, lower = more aggressive
 
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+  apiKey: (import.meta as any).env?.VITE_OPENAI_API_KEY || process.env.OPENAI_API_KEY,
   dangerouslyAllowBrowser: true,
 });
 
@@ -159,35 +159,89 @@ function toUnixSeconds(iso: string): number | null {
   return isNaN(ms) ? null : Math.floor(ms / 1000);
 }
 
+/**
+ * POST a single approved event to CommunityHub.
+ *
+ * Payload mirrors the structure returned by GET /api/legacy/calendar/posts,
+ * so the hub can parse it correctly.
+ *
+ * Auth: set VITE_COMMUNITYHUB_TOKEN in Vercel env vars if the hub requires
+ * a Bearer token.  If not set, the request is sent without auth (works for
+ * open hubs).
+ */
 export async function postToCommunityHub(event: StagingEvent): Promise<{ id: number }> {
   const startTs = event.start_datetime ? toUnixSeconds(event.start_datetime) : null;
   const endTs   = event.end_datetime   ? toUnixSeconds(event.end_datetime)   : null;
 
+  // Build location string matching CommunityHub's format
+  const locationName = [event.location_name, event.location_address]
+    .filter(Boolean)
+    .join(', ');
+
   const payload = {
-    name: event.title,
-    description: event.description_short || event.description_long?.slice(0, 200) || '',
+    // Core identity
+    name:               event.title,
+    description:        event.description_short || event.description_long?.slice(0, 300) || '',
     extendedDescription: event.description_long || '',
-    website:  event.event_url   || '',
-    image:    event.image_url   || '',
+
+    // Media & links
+    website:   event.event_url  || '',
+    image:     event.image_url  || '',
+    urlLink:   event.event_url  || '',
+
+    // Type flags
     isAnnouncement: false,
-    location: event.location_name
-      ? { name: event.location_name, address: event.location_address || event.location_name }
+    eventType:      'ot',           // 'ot' = other/event  (vs 'an' = announcement)
+    locationType:   'ph2',          // physical location type used by CommunityHub
+    public:         true,
+
+    // Contact (leave blank — organizer info isn't always available)
+    email:   '',
+    phone:   '',
+    roomNum: '',
+
+    // Timezone
+    timezone: 'America/New_York',
+
+    // Location object  (CommunityHub expects { name: "<address string>" })
+    location: locationName
+      ? { name: locationName }
       : null,
+
+    // Sessions — array of unix-second timestamps
     sessions: startTs
       ? [{ start: startTs, end: endTs ?? startTs + 3600 }]
       : [],
+
+    // Optional metadata
+    sponsors: event.organizer
+      ? [{ name: event.organizer }]
+      : [],
+    postType: event.tags?.slice(0, 1).map(t => ({ name: t })) ?? [],
   };
+
+  // Optional Bearer token (set in Vercel env as VITE_COMMUNITYHUB_TOKEN)
+  const token: string | undefined =
+    (import.meta as any).env?.VITE_COMMUNITYHUB_TOKEN ||
+    process.env.COMMUNITYHUB_TOKEN;
+
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
 
   const res = await fetch(`${HUB_BASE}/api/legacy/calendar/posts`, {
     method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body:    JSON.stringify(payload),
   });
 
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`CommunityHub POST failed (${res.status}): ${text}`);
+    const raw = await res.text();
+    // Strip any HTML from the error message for clean display
+    const clean = raw.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300);
+    throw new Error(`CommunityHub POST ${res.status}: ${clean}`);
   }
 
-  return res.json();
+  const json = await res.json();
+  // Hub may return { id } or { post: { id } } — handle both
+  return { id: json.id ?? json.post?.id ?? 0 };
 }

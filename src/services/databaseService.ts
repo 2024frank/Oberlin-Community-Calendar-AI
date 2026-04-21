@@ -73,5 +73,26 @@ export const databaseService = {
     const events = this.getAll();
     const updated = events.map(e => e.id === id ? { ...e, review_status: status as any } : e);
     localStorage.setItem(DB_KEY, JSON.stringify(updated));
+  },
+
+  /**
+   * Remove an event entirely from the staging database (e.g. after pushing to CommunityHub)
+   */
+  remove(id: string): void {
+    const events = this.getAll().filter(e => e.id !== id);
+    localStorage.setItem(DB_KEY, JSON.stringify(events));
+  },
+
+  /**
+   * Update communityHubStatus and communityHubId on an event
+   */
+  updateHubStatus(id: string, status: 'exists' | 'new' | 'unknown' | 'sent', hubId?: number | null): void {
+    const events = this.getAll();
+    const updated = events.map(e =>
+      e.id === id
+        ? { ...e, communityHubStatus: status, communityHubId: hubId ?? e.communityHubId }
+        : e
+    );
+    localStorage.setItem(DB_KEY, JSON.stringify(updated));
   }
 };

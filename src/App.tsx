@@ -347,39 +347,60 @@ export default function App() {
 
   const handleSendToHub = async (event: StagingEvent) => {
     try {
-      const result = await postToCommunityHub(event);
-      const updated = stagingEvents.map(e =>
-        e.id === event.id
-          ? { ...e, communityHubStatus: 'sent' as const, communityHubId: result.id }
-          : e
-      );
-      localStorage.setItem('civicfeed_staging_events', JSON.stringify(updated));
-      setStagingEvents(updated);
+      await postToCommunityHub(event);
+
+      // ── Clear from local DB immediately after successful push ──────────────
+      databaseService.remove(event.id);
+      const remaining = databaseService.getAll();
+      setStagingEvents(remaining);
+
+      // Sync the removal to Redis so the event is gone from the backend too
+      await syncToDatabase(remaining);
+
+      setLastLog(`✓ "${event.title}" sent to CommunityHub & cleared from database`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      // Strip any HTML from the error before showing it
-      const clean = msg.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim().slice(0, 200);
+      const clean = msg.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim().slice(0, 250);
       setLastLog(`CommunityHub error: ${clean}`);
     }
   };
 
   const handleBulkSendToHub = async () => {
     const toSend = stagingEvents.filter(
-      e => e.review_status === 'approved' && e.communityHubStatus !== 'sent' && e.communityHubStatus !== 'exists'
+      e => e.review_status === 'approved' &&
+           e.communityHubStatus !== 'sent' &&
+           e.communityHubStatus !== 'exists'
     );
-    if (toSend.length === 0) return;
-    setLastLog(`Sending ${toSend.length} approved events to CommunityHub...`);
+    if (toSend.length === 0) {
+      setLastLog('No approved events left to push (all already on Hub or none approved).');
+      return;
+    }
+    setLastLog(`Pushing ${toSend.length} approved events to CommunityHub...`);
     let sent = 0;
+    let failed = 0;
+
     for (const event of toSend) {
       try {
-        await handleSendToHub(event);
+        await postToCommunityHub(event);
+        // Remove each one immediately after success
+        databaseService.remove(event.id);
         sent++;
-        setLastLog(`Sent ${sent}/${toSend.length} to CommunityHub...`);
-      } catch {
-        // individual errors handled inside handleSendToHub
+        setLastLog(`Pushed ${sent}/${toSend.length} · "${event.title}" cleared from DB`);
+      } catch (err) {
+        failed++;
+        const msg = err instanceof Error ? err.message : String(err);
+        const clean = msg.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim().slice(0, 150);
+        console.error(`Hub push failed for "${event.title}": ${clean}`);
       }
     }
-    setLastLog(`Bulk push complete: ${sent} events sent to CommunityHub.`);
+
+    // Sync whatever remains to Redis in one shot
+    const remaining = databaseService.getAll();
+    setStagingEvents(remaining);
+    await syncToDatabase(remaining);
+
+    const failMsg = failed > 0 ? ` · ${failed} failed` : '';
+    setLastLog(`✓ Bulk push done: ${sent} sent to CommunityHub & cleared from DB${failMsg}`);
   };
 
   const updateSourceFrequency = (id: string, frequency: number) => {
